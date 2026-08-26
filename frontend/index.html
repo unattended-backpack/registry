@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EF Registry</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header>
+  <h1>EF Registry</h1>
+  <p class="sub">An onchain directory of Ethereum Foundation personnel.
+  Gated by email, controlled by keys, proven in your browser.</p>
+  <nav id="tabs">
+    <button data-tab="browse" class="active">Browse</button>
+    <button data-tab="manage">Manage</button>
+    <button data-tab="register">Register</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <p id="status" class="status"></p>
+</header>
+
+<main>
+  <!-- Browse ------------------------------------------------------------- -->
+  <section id="browse" class="tab active">
+    <h2>Browse the directory</h2>
+    <div class="row">
+      <button id="loadAll">Load all profiles</button>
+      <span class="hint">Reads over your configured RPC. Nothing is written.</span>
+    </div>
+    <div class="row">
+      <input id="lookupId" placeholder="Look up one profile by id (0x...)" />
+      <button id="lookupBtn">Look up</button>
+    </div>
+    <div id="profiles" class="profiles"></div>
+  </section>
+
+  <!-- Manage ------------------------------------------------------------- -->
+  <section id="manage" class="tab">
+    <h2>Manage a profile</h2>
+    <p class="hint">Records are the controller's to edit. Set them directly if
+    your wallet can transact, or sign them for a relayer if it cannot.</p>
+    <div class="row">
+      <button id="connectManage">Connect wallet</button>
+      <span id="walletManage" class="mono"></span>
+    </div>
+    <label>Profile id
+      <input id="mProfileId" placeholder="0x..." /></label>
+    <label>Record key
+      <input id="mKey" placeholder="url" /></label>
+    <label>Record value <span class="hint">(empty clears)</span>
+      <input id="mValue" placeholder="https://..." /></label>
+    <div class="row">
+      <button id="mSetText">Set by transaction</button>
+      <button id="mSignText">Sign for a relayer</button>
+    </div>
+    <pre id="mSignOut" class="out hidden"></pre>
+    <div class="row hidden" id="mSubmitRow">
+      <button id="mSubmitSigned">Submit the signed write</button>
+    </div>
+    <hr />
+    <h3>Rotate the controller</h3>
+    <p class="hint">Needs a fresh email proof and the current controller's
+    signature. Acquire the proof below, then rotate.</p>
+    <label>New controller address
+      <input id="rNewController" placeholder="0x..." /></label>
+    <div id="rotateProofMount"></div>
+    <div class="row">
+      <button id="rRotate" disabled>Rotate controller</button>
+    </div>
+    <pre id="mOut" class="out"></pre>
+  </section>
+
+  <!-- Register ----------------------------------------------------------- -->
+  <section id="register" class="tab">
+    <h2>Register a profile</h2>
+    <ol class="steps">
+      <li>
+        <h3>1. Choose your controller and get your email command</h3>
+        <label>Controller address <span class="hint">(a key you hold)</span>
+          <input id="regController" placeholder="0x..." /></label>
+        <button id="regBuildCommand">Build the command</button>
+        <p class="hint">Send an email <strong>from your @<span
+        id="domainLabel">ethereum.org</span> address to yourself</strong>
+        whose body contains exactly this line, including your ZK Email
+        invitation code, then export the raw message ("Show original" in
+        Gmail) as an <code>.eml</code> file.</p>
+        <pre id="regCommand" class="out"></pre>
+      </li>
+      <li>
+        <h3>2. Prove your email, locally</h3>
+        <div id="registerProofMount"></div>
+      </li>
+      <li>
+        <h3>3. Submit</h3>
+        <div class="row">
+          <button id="regConnect">Connect wallet</button>
+          <span id="walletRegister" class="mono"></span>
+        </div>
+        <div class="row">
+          <button id="regSubmit" disabled>Register</button>
+        </div>
+        <pre id="regOut" class="out"></pre>
+      </li>
+    </ol>
+  </section>
+
+  <!-- Settings ----------------------------------------------------------- -->
+  <section id="settings" class="tab">
+    <h2>Settings</h2>
+    <p class="hint">Saved in this browser only. The defaults ship in
+    <code>config.js</code>; edit that file before pinning the site to change
+    them for everyone.</p>
+    <label>Chain id <input id="sChainId" /></label>
+    <label>RPC URL <input id="sRpcUrl" /></label>
+    <label>Registry address <input id="sRegistry" placeholder="0x..." /></label>
+    <label>Prover artifact base
+      <input id="sArtifacts" placeholder="https://... or ipfs path (optional)" /></label>
+    <div class="row">
+      <button id="sSave">Save</button>
+      <button id="sReset" class="ghost">Reset to shipped defaults</button>
+    </div>
+    <p id="sSaved" class="hint"></p>
+  </section>
+</main>
+
+<footer>
+  <p>Static and self-contained. No server sees your email, keys, or
+  signatures. <span id="cfgSummary" class="mono"></span></p>
+</footer>
+
+<template id="proofBlock">
+  <div class="proofblock">
+    <div class="row">
+      <label class="file">Prove from an .eml file
+        <input type="file" accept=".eml,message/rfc822,text/plain" class="pbFile" />
+      </label>
+      <button class="pbProve">Prove in browser</button>
+    </div>
+    <details class="pbImportWrap">
+      <summary>or import a proof from the CLI</summary>
+      <textarea class="pbImport" rows="5" placeholder='Paste an EmailProof JSON or a snarkjs bundle'></textarea>
+      <button class="pbImportBtn">Import proof</button>
+    </details>
+    <pre class="pbStatus out"></pre>
+  </div>
+</template>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="abi.js"></script>
+<script src="registry.js"></script>
+<script src="prove.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

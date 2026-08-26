@@ -1,0 +1,16 @@
+{
+  "name": "registry-circuits",
+  "private": true,
+  "license": "LicenseRef-VPL WITH AGPL-3.0-only",
+  "version": "1.0.0",
+  "description": "Vendored ZK Email email_auth circuit (email-tx-builder v1.0.0) and the zkey verification pipeline for the Registry.",
+  "scripts": {
+    "build": "mkdir -p build && circom src/email_auth.circom --r1cs --sym -l node_modules -o ./build"
+  },
+  "dependencies": {
+    "@zk-email/circuits": "=6.3.2",
+    "@zk-email/zk-regex-circom": "=2.3.1",
+    "circomlib": "=2.0.5",
+    "snarkjs": "=0.7.5"
+  }
+}
