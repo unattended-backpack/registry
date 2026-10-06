@@ -1,0 +1,3 @@
+[workspace]
+members = ["lib", "email_proof", "dkim_key_hash"]
+default-member = "email_proof"

@@ -3,19 +3,39 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>EF Registry</title>
+<title>Ethereum Foundation Registry</title>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <header>
-  <h1>EF Registry</h1>
+  <h1>Ethereum Foundation Registry</h1>
   <p class="sub">An onchain directory of Ethereum Foundation personnel.
-  Gated by email, controlled by keys, proven in your browser.</p>
+  Profiles are private and require a proven @ethereum.org email to manage.
+  All proofs are locally-generated in the browser.</p>
+
+  <section id="network" class="network">
+    <form id="rpcForm">
+      <label for="rpcUrl">RPC URL <span class="req">required</span></label>
+      <div class="rpcrow">
+        <input id="rpcUrl" type="url" placeholder="http://127.0.0.1:8545"
+          autocomplete="off" spellcheck="false" required />
+        <button id="rpcConnect" type="submit">Connect</button>
+      </div>
+    </form>
+    <p class="hint">This should be your own node, ideally a local one. Every
+    read and every check of a transaction goes through it; the page contacts
+    nothing else.</p>
+    <dl class="netfacts">
+      <dt>Chain ID</dt><dd id="netChain" class="mono"></dd>
+      <dt>Registry</dt><dd id="netRegistry" class="mono"></dd>
+      <dt>Status</dt><dd id="netStatus"><span class="dot"></span>Not connected</dd>
+    </dl>
+  </section>
+
   <nav id="tabs">
     <button data-tab="browse" class="active">Browse</button>
-    <button data-tab="manage">Manage</button>
     <button data-tab="register">Register</button>
-    <button data-tab="settings">Settings</button>
+    <button data-tab="manage">Manage</button>
   </nav>
   <p id="status" class="status"></p>
 </header>
@@ -23,125 +43,157 @@
 <main>
   <!-- Browse ------------------------------------------------------------- -->
   <section id="browse" class="tab active">
-    <h2>Browse the directory</h2>
-    <div class="row">
-      <button id="loadAll">Load all profiles</button>
-      <span class="hint">Reads over your configured RPC. Nothing is written.</span>
+    <div class="browsebar">
+      <input id="search" type="search" placeholder="Search every record, controller, and profile id"
+        autocomplete="off" spellcheck="false" aria-label="Search profiles" />
+      <span id="profileCount" class="hint"></span>
     </div>
-    <div class="row">
-      <input id="lookupId" placeholder="Look up one profile by id (0x...)" />
-      <button id="lookupBtn">Look up</button>
+    <div id="profiles" class="grid">
+      <p class="empty">Enter an RPC URL above to load the directory.</p>
     </div>
-    <div id="profiles" class="profiles"></div>
-  </section>
-
-  <!-- Manage ------------------------------------------------------------- -->
-  <section id="manage" class="tab">
-    <h2>Manage a profile</h2>
-    <p class="hint">Records are the controller's to edit. Set them directly if
-    your wallet can transact, or sign them for a relayer if it cannot.</p>
-    <div class="row">
-      <button id="connectManage">Connect wallet</button>
-      <span id="walletManage" class="mono"></span>
-    </div>
-    <label>Profile id
-      <input id="mProfileId" placeholder="0x..." /></label>
-    <label>Record key
-      <input id="mKey" placeholder="url" /></label>
-    <label>Record value <span class="hint">(empty clears)</span>
-      <input id="mValue" placeholder="https://..." /></label>
-    <div class="row">
-      <button id="mSetText">Set by transaction</button>
-      <button id="mSignText">Sign for a relayer</button>
-    </div>
-    <pre id="mSignOut" class="out hidden"></pre>
-    <div class="row hidden" id="mSubmitRow">
-      <button id="mSubmitSigned">Submit the signed write</button>
-    </div>
-    <hr />
-    <h3>Rotate the controller</h3>
-    <p class="hint">Needs a fresh email proof and the current controller's
-    signature. Acquire the proof below, then rotate.</p>
-    <label>New controller address
-      <input id="rNewController" placeholder="0x..." /></label>
-    <div id="rotateProofMount"></div>
-    <div class="row">
-      <button id="rRotate" disabled>Rotate controller</button>
-    </div>
-    <pre id="mOut" class="out"></pre>
   </section>
 
   <!-- Register ----------------------------------------------------------- -->
-  <section id="register" class="tab">
+  <section id="register" class="tab narrow">
     <h2>Register a profile</h2>
     <ol class="steps">
       <li>
-        <h3>1. Choose your controller and get your email command</h3>
-        <label>Controller address <span class="hint">(a key you hold)</span>
-          <input id="regController" placeholder="0x..." /></label>
-        <button id="regBuildCommand">Build the command</button>
-        <p class="hint">Send an email <strong>from your @<span
-        id="domainLabel">ethereum.org</span> address to yourself</strong>
-        whose body contains exactly this line, including your ZK Email
-        invitation code, then export the raw message ("Show original" in
-        Gmail) as an <code>.eml</code> file.</p>
-        <pre id="regCommand" class="out"></pre>
+        <h3>1. Your profile secret</h3>
+        <p class="hint">The secret makes your profile yours and nobody
+        else's to find. It never leaves this browser. <strong>Save it
+        somewhere safe</strong>: every renewal needs it. Lose it and your
+        profile lapses at its next renewal; register a fresh one then.</p>
+        <div class="row">
+          <button id="regNewSecret">Create a new secret</button>
+          <span class="hint">or paste one you already have</span>
+        </div>
+        <input id="regSecret" class="mono" placeholder="0x..." autocomplete="off" />
+        <label class="check"><input type="checkbox" id="regSaved" />
+          I have saved this secret somewhere safe.</label>
       </li>
       <li>
-        <h3>2. Prove your email, locally</h3>
+        <h3>2. Choose your controller and get your subject line</h3>
+        <label>Controller address <span class="hint">(a key you hold, with
+          no link to you; it signs, and never needs funds)</span>
+          <input id="regController" placeholder="0x..." /></label>
+        <label>Your email address <span class="hint">(optional; only to
+          show your profile id; stays in this browser)</span>
+          <input id="regEmail" placeholder="you@ethereum.org" autocomplete="off" /></label>
+        <button id="regBuildCommand">Build the subject line</button>
+        <pre id="regCommand" class="out"></pre>
+        <div id="regProfile" class="summary"></div>
+      </li>
+      <li>
+        <h3>3. Send the email</h3>
+        <p class="hint">From your <strong>@<span
+        id="domainLabel">ethereum.org</span></strong> address, send an email
+        whose <strong>subject is exactly that line</strong>. The body can be
+        anything. Send it to <strong>another inbox you can read</strong>:
+        mail you send to your own address is never DKIM signed. Open it there
+        and download the original message ("Download original" in Gmail) as
+        an <code>.eml</code> file. The subject reveals nothing: only your
+        secret opens it.</p>
+      </li>
+      <li>
+        <h3>4. Prove your email, locally</h3>
         <div id="registerProofMount"></div>
       </li>
       <li>
-        <h3>3. Submit</h3>
+        <h3>5. Prepare the registration, then broadcast it, ideally later</h3>
+        <p class="hint">Registration needs no signature: the proof is the
+        authority, so anyone may broadcast it. The chain sees when it lands,
+        and anyone who can read your mailbox sees when you sent the email. To
+        keep those two apart, copy the transaction and broadcast it hours or
+        days later, from an account with no link to you or through a relayer.
+        It stays valid as long as the email does: four weeks.</p>
         <div class="row">
-          <button id="regConnect">Connect wallet</button>
-          <span id="walletRegister" class="mono"></span>
+          <button id="regPrepare" disabled>Prepare the registration</button>
         </div>
-        <div class="row">
-          <button id="regSubmit" disabled>Register</button>
-        </div>
-        <pre id="regOut" class="out"></pre>
+        <div id="regSigned"></div>
       </li>
     </ol>
   </section>
 
-  <!-- Settings ----------------------------------------------------------- -->
-  <section id="settings" class="tab">
-    <h2>Settings</h2>
-    <p class="hint">Saved in this browser only. The defaults ship in
-    <code>config.js</code>; edit that file before pinning the site to change
-    them for everyone.</p>
-    <label>Chain id <input id="sChainId" /></label>
-    <label>RPC URL <input id="sRpcUrl" /></label>
-    <label>Registry address <input id="sRegistry" placeholder="0x..." /></label>
-    <label>Prover artifact base
-      <input id="sArtifacts" placeholder="https://... or ipfs path (optional)" /></label>
+  <!-- Manage ------------------------------------------------------------- -->
+  <section id="manage" class="tab narrow">
+    <h2>Manage a profile</h2>
+    <h3>Find your profile</h3>
+    <p class="hint">Your email address and secret compute your profile id
+    here, in this browser. Neither is sent anywhere.</p>
+    <label>Email address <input id="mEmail" placeholder="you@ethereum.org" autocomplete="off" /></label>
+    <label>Profile secret <input id="mSecret" class="mono" placeholder="0x..." autocomplete="off" /></label>
     <div class="row">
-      <button id="sSave">Save</button>
-      <button id="sReset" class="ghost">Reset to shipped defaults</button>
+      <button id="mFind">Find my profile</button>
     </div>
-    <p id="sSaved" class="hint"></p>
+    <input id="mProfileId" type="hidden" />
+    <div id="mProfile" class="summary"></div>
+
+    <hr />
+    <h3>Records</h3>
+    <p class="hint">Edit any value in place, add new records, or empty a value
+    to clear its record. Every change goes out together: the controller signs
+    once, and anyone may broadcast the result, so the controller never needs
+    funds.</p>
+    <table id="recTable" class="records">
+      <thead>
+        <tr><th>Key</th><th>Value</th><th><span class="sr">Clear or remove</span></th></tr>
+      </thead>
+      <tbody id="recBody">
+        <tr class="placeholder"><td colspan="3">Find your profile above to see its records.</td></tr>
+      </tbody>
+    </table>
+    <datalist id="knownKeys"></datalist>
+    <div class="row">
+      <button id="recAdd" class="ghost" disabled>Add a record</button>
+      <button id="recDiscard" class="ghost" disabled>Discard changes</button>
+    </div>
+    <div class="row">
+      <button id="recSign" disabled>Sign the changes with the controller</button>
+      <span id="recSummary" class="hint"></span>
+    </div>
+    <div id="recSigned"></div>
+
+    <hr />
+    <h3>Renew, or rotate the controller</h3>
+    <p class="hint">Renew at least every 90 days: send a fresh email
+    authorizing your current controller again. To rotate, authorize a new
+    controller instead. Either way the current controller co-signs, and
+    your secret (above) builds the subject line.</p>
+    <label>Controller to authorize <span class="hint">(your current
+      controller to renew; a new one to rotate)</span>
+      <input id="rController" placeholder="0x..." /></label>
+    <button id="rBuildCommand">Build the subject line</button>
+    <pre id="rCommand" class="out"></pre>
+    <div id="rotateProofMount"></div>
+    <div class="row">
+      <button id="rSign" disabled>Sign the authorization with the current controller</button>
+    </div>
+    <div id="rotSigned"></div>
   </section>
 </main>
 
-<footer>
-  <p>Static and self-contained. No server sees your email, keys, or
-  signatures. <span id="cfgSummary" class="mono"></span></p>
-</footer>
+<template id="signedBlock">
+  <div class="signedblock">
+    <p class="hint sbHint">This is the complete transaction. Copy it to any
+    relayer, or broadcast it yourself from whichever account your wallet has
+    selected when you click; it need not be the account that signed.</p>
+    <pre class="out sbOut"></pre>
+    <div class="row">
+      <button class="sbCopy">Copy for a relayer</button>
+      <button class="sbBroadcast">Broadcast it myself</button>
+    </div>
+    <pre class="out sbStatus"></pre>
+  </div>
+</template>
 
 <template id="proofBlock">
   <div class="proofblock">
     <div class="row">
-      <label class="file">Prove from an .eml file
+      <label class="file">The downloaded <code>.eml</code> file
         <input type="file" accept=".eml,message/rfc822,text/plain" class="pbFile" />
       </label>
       <button class="pbProve">Prove in browser</button>
     </div>
-    <details class="pbImportWrap">
-      <summary>or import a proof from the CLI</summary>
-      <textarea class="pbImport" rows="5" placeholder='Paste an EmailProof JSON or a snarkjs bundle'></textarea>
-      <button class="pbImportBtn">Import proof</button>
-    </details>
     <pre class="pbStatus out"></pre>
   </div>
 </template>
@@ -151,6 +203,6 @@
 <script src="abi.js"></script>
 <script src="registry.js"></script>
 <script src="prove.js"></script>
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

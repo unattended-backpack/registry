@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
 import { EmailProof } from "../src/interfaces/IVerifier.sol";
@@ -23,7 +23,7 @@ import { Test } from "forge-std/Test.sol";
   profile's nonce counts exactly its relayed signed writes; and an inactive
   profile's records and controller are frozen where the flag found them.
 
-  @custom:date August 21st, 2026.
+  @custom:date October 1st, 2026.
 */
 contract RegistryInvariantTest is
   Test {
@@ -77,15 +77,15 @@ contract RegistryInvariantTest is
 
   /// Every identity the handler registered is still registered, as flagged.
   function invariant_registrationsPersist () public view {
-    for (uint256 i = 0; i < handler.saltCount(); ++i) {
-      bytes32 _salt = handler.saltAt(i);
-      (, bool _active, uint256 _registeredAt, ) = registry.profiles(_salt);
-      if (!handler.ghostRegistered(_salt)) {
+    for (uint256 i = 0; i < handler.identityCount(); ++i) {
+      bytes32 _identity = handler.identityAt(i);
+      (, bool _active, uint256 _registeredAt, ) = registry.profiles(_identity);
+      if (!handler.ghostRegistered(_identity)) {
         assertEq(_registeredAt, 0, "an unregistered identity has a profile");
         continue;
       }
       assertGt(_registeredAt, 0, "a registered profile vanished");
-      assertEq(_active, handler.ghostActive(_salt), "active flag diverged");
+      assertEq(_active, handler.ghostActive(_identity), "active flag diverged");
     }
   }
 
@@ -101,8 +101,8 @@ contract RegistryInvariantTest is
 
   /// No profile's clock runs ahead of the emails the handler has sent.
   function invariant_timestampsBoundedByClock () public view {
-    for (uint256 i = 0; i < handler.saltCount(); ++i) {
-      (, , , uint256 _lastTimestamp) = registry.profiles(handler.saltAt(i));
+    for (uint256 i = 0; i < handler.identityCount(); ++i) {
+      (, , , uint256 _lastTimestamp) = registry.profiles(handler.identityAt(i));
       assertLe(_lastTimestamp, handler.clock(), "a profile clock ran ahead");
     }
   }
@@ -117,10 +117,10 @@ contract RegistryInvariantTest is
 
   /// Every registered profile is a two-of-two: its controller is never zero.
   function invariant_controllersAlwaysBound () public view {
-    for (uint256 i = 0; i < handler.saltCount(); ++i) {
-      bytes32 _salt = handler.saltAt(i);
+    for (uint256 i = 0; i < handler.identityCount(); ++i) {
+      bytes32 _identity = handler.identityAt(i);
       (address _controller, , uint256 _registeredAt, ) = registry.profiles(
-        _salt
+        _identity
       );
       if (_registeredAt == 0) {
         continue;
@@ -131,10 +131,10 @@ contract RegistryInvariantTest is
 
   /// Each profile's nonce counts exactly its relayed signed writes.
   function invariant_noncesCountSignedWrites () public view {
-    for (uint256 i = 0; i < handler.saltCount(); ++i) {
-      bytes32 _salt = handler.saltAt(i);
+    for (uint256 i = 0; i < handler.identityCount(); ++i) {
+      bytes32 _identity = handler.identityAt(i);
       assertEq(
-        registry.nonces(_salt), handler.ghostSignedWrites(_salt),
+        registry.nonces(_identity), handler.ghostSignedWrites(_identity),
         "a profile nonce diverged"
       );
     }
@@ -142,23 +142,23 @@ contract RegistryInvariantTest is
 
   /// An inactive profile's records and controller are frozen where flagged.
   function invariant_inactiveProfilesFrozen () public view {
-    for (uint256 i = 0; i < handler.saltCount(); ++i) {
-      bytes32 _salt = handler.saltAt(i);
+    for (uint256 i = 0; i < handler.identityCount(); ++i) {
+      bytes32 _identity = handler.identityAt(i);
       (address _controller, bool _active, uint256 _registeredAt, ) =
       registry.profiles(
-        _salt
+        _identity
       );
       if (_registeredAt == 0 || _active) {
         continue;
       }
       assertEq(
-        _controller, handler.frozenController(_salt),
+        _controller, handler.frozenController(_identity),
         "an inactive profile's controller moved"
       );
       for (uint256 j = 0; j < handler.keyCount(); ++j) {
         string memory _key = handler.keyAt(j);
         assertEq(
-          registry.text(_salt, _key), handler.frozenText(_salt, _key),
+          registry.text(_identity, _key), handler.frozenText(_identity, _key),
           "an inactive profile's record moved"
         );
       }
@@ -184,7 +184,7 @@ contract RegistryInvariantTest is
   how, which emails were sent, who management is, and what an inactive
   profile looked like the moment it was frozen.
 
-  @custom:date August 21st, 2026.
+  @custom:date October 1st, 2026.
 */
 contract RegistryHandler is
   Test {
@@ -199,7 +199,7 @@ contract RegistryHandler is
   address public management;
 
   /// The fixed cast of identities.
-  bytes32[] internal saltList;
+  bytes32[] internal identityList;
 
   /// The fixed cast of controllers.
   address[] internal controllerList;
@@ -235,52 +235,52 @@ contract RegistryHandler is
   /**
     Whether an identity has been registered.
 
-    @custom:param _salt The identity.
+    @custom:param _identity The identity.
     @custom:return _ Whether it has been registered.
   */
   mapping (
-    bytes32 _salt => bool _registered
+    bytes32 _identity => bool _registered
   ) public ghostRegistered;
 
   /**
     Whether a registered identity is flagged active.
 
-    @custom:param _salt The identity.
+    @custom:param _identity The identity.
     @custom:return _ Whether it is flagged active.
   */
   mapping (
-    bytes32 _salt => bool _active
+    bytes32 _identity => bool _active
   ) public ghostActive;
 
   /**
     The number of relayed signed writes made for an identity.
 
-    @custom:param _salt The identity.
+    @custom:param _identity The identity.
     @custom:return _ The number of relayed signed writes made.
   */
   mapping (
-    bytes32 _salt => uint256 _count
+    bytes32 _identity => uint256 _count
   ) public ghostSignedWrites;
 
   /**
     The controller an identity had the moment it was last flagged inactive.
 
-    @custom:param _salt The identity.
+    @custom:param _identity The identity.
     @custom:return _ The frozen controller.
   */
   mapping (
-    bytes32 _salt => address _controller
+    bytes32 _identity => address _controller
   ) public frozenController;
 
   /**
     The records an identity had the moment it was last flagged inactive.
 
-    @custom:param _salt The identity.
+    @custom:param _identity The identity.
     @custom:param _key The record key.
     @custom:return _ The frozen record value.
   */
   mapping (
-    bytes32 _salt => mapping (
+    bytes32 _identity => mapping (
       string _key => string _value
     )
   ) internal frozenTexts;
@@ -300,10 +300,10 @@ contract RegistryHandler is
     registry = _registry;
     management = _management;
     keyHash = _keyHash;
-    saltList.push(keccak256("alice@ethereum.org|code"));
-    saltList.push(keccak256("bob@ethereum.org|code"));
-    saltList.push(keccak256("carol@ethereum.org|code"));
-    saltList.push(keccak256("dave@ethereum.org|code"));
+    identityList.push(sha256("alice@ethereum.org"));
+    identityList.push(sha256("bob@ethereum.org"));
+    identityList.push(sha256("carol@ethereum.org"));
+    identityList.push(sha256("dave@ethereum.org"));
     _addController("walletA");
     _addController("walletB");
     _addController("walletC");
@@ -323,8 +323,8 @@ contract RegistryHandler is
 
     @return _ The number of identities.
   */
-  function saltCount () external view returns (uint256) {
-    return saltList.length;
+  function identityCount () external view returns (uint256) {
+    return identityList.length;
   }
 
   /**
@@ -334,10 +334,10 @@ contract RegistryHandler is
 
     @return _ The identity.
   */
-  function saltAt (
+  function identityAt (
     uint256 _index
   ) external view returns (bytes32) {
-    return saltList[_index];
+    return identityList[_index];
   }
 
   /**
@@ -374,16 +374,16 @@ contract RegistryHandler is
   /**
     Retrieve a frozen record.
 
-    @param _salt The identity.
+    @param _identity The identity.
     @param _key The record key.
 
     @return _ The record value the identity had when last flagged inactive.
   */
   function frozenText (
-    bytes32 _salt,
+    bytes32 _identity,
     string calldata _key
   ) external view returns (string memory) {
-    return frozenTexts[_salt][_key];
+    return frozenTexts[_identity][_key];
   }
 
   /**
@@ -393,10 +393,10 @@ contract RegistryHandler is
 
     @return _ The chosen identity.
   */
-  function _pickSalt (
+  function _pickIdentity (
     uint256 _seed
   ) internal view returns (bytes32) {
-    return saltList[_seed % saltList.length];
+    return identityList[_seed % identityList.length];
   }
 
   /**
@@ -441,16 +441,16 @@ contract RegistryHandler is
   /**
     Sign the current controller's authorization of one email.
 
-    @param _salt The identity whose controller signs.
+    @param _identity The identity whose controller signs.
     @param _emailNullifier The nullifier of the email to authorize.
 
     @return _ The signature.
   */
   function _sign (
-    bytes32 _salt,
+    bytes32 _identity,
     bytes32 _emailNullifier
   ) internal view returns (bytes memory) {
-    (address _controller, , , ) = registry.profiles(_salt);
+    (address _controller, , , ) = registry.profiles(_identity);
     (uint8 _v, bytes32 _r, bytes32 _s) = vm.sign(
       controllerKeys[_controller], registry.authorizationDigest(
         _emailNullifier
@@ -461,16 +461,16 @@ contract RegistryHandler is
 
   /**
     Build the next email from an identity: stamped later than every email before
-    it, with a fresh nullifier, carrying the account code.
+    it, with a fresh nullifier.
 
-    @param _salt The sender's identity.
-    @param _command The command the email carries.
+    @param _identity The sender's identity.
+    @param _controller The controller the email authorizes.
 
     @return _ The email proof.
   */
   function _emailFrom (
-    bytes32 _salt,
-    string memory _command
+    bytes32 _identity,
+    address _controller
   ) internal returns (EmailProof memory) {
     clock += 1;
     bytes32 _nullifier =
@@ -480,27 +480,27 @@ contract RegistryHandler is
       domainName: "ethereum.org",
       publicKeyHash: keyHash,
       timestamp: clock,
-      maskedCommand: _command,
       emailNullifier: _nullifier,
-      accountSalt: _salt,
-      isCodeExist: true,
-      proof: "valid"
+      profileId: _identity,
+      proof: abi.encode(
+        keccak256("valid"), _controller, block.chainid, address(registry)
+      )
     });
   }
 
   /**
     Note that an identity is registered, if it was not already.
 
-    @param _salt The identity.
+    @param _identity The identity.
   */
   function _noteRegistered (
-    bytes32 _salt
+    bytes32 _identity
   ) internal {
-    if (ghostRegistered[_salt]) {
+    if (ghostRegistered[_identity]) {
       return;
     }
-    ghostRegistered[_salt] = true;
-    ghostActive[_salt] = true;
+    ghostRegistered[_identity] = true;
+    ghostActive[_identity] = true;
     ghostRegisteredCount += 1;
   }
 
@@ -508,32 +508,28 @@ contract RegistryHandler is
     Register an identity by email, or rotate its controller with the current
     controller's signature.
 
-    @param _saltSeed The identity selection seed.
+    @param _identitySeed The identity selection seed.
     @param _controllerSeed The controller selection seed.
   */
   function setController (
-    uint256 _saltSeed,
+    uint256 _identitySeed,
     uint256 _controllerSeed
   ) external {
-    bytes32 _salt = _pickSalt(_saltSeed);
+    bytes32 _identity = _pickIdentity(_identitySeed);
     address _controller =
       controllerList[_controllerSeed % controllerList.length];
-    if (!ghostRegistered[_salt]) {
-      registry.register(
-        _emailFrom(_salt, registry.setControllerCommand(_controller)),
-        _controller
-      );
-      _noteRegistered(_salt);
+    if (!ghostRegistered[_identity]) {
+      registry.register(_emailFrom(_identity, _controller), _controller);
+      _noteRegistered(_identity);
       return;
     }
 
-    if (!ghostActive[_salt]) {
+    if (!ghostActive[_identity]) {
       return;
     }
-    EmailProof memory _proof =
-      _emailFrom(_salt, registry.setControllerCommand(_controller));
+    EmailProof memory _proof = _emailFrom(_identity, _controller);
     registry.setController(
-      _proof, _controller, _sign(_salt, _proof.emailNullifier)
+      _proof, _controller, _sign(_identity, _proof.emailNullifier)
     );
   }
 
@@ -541,81 +537,171 @@ contract RegistryHandler is
     Set or clear a registered identity's record by the controller's relayed
     signature at the current nonce.
 
-    @param _saltSeed The identity selection seed.
+    @param _identitySeed The identity selection seed.
     @param _keySeed The key selection seed.
     @param _valueSeed The value selection seed.
     @param _clear Whether to clear the record instead of setting it.
   */
   function setTextSigned (
-    uint256 _saltSeed,
+    uint256 _identitySeed,
     uint256 _keySeed,
     uint256 _valueSeed,
     bool _clear
   ) external {
-    bytes32 _salt = _pickSalt(_saltSeed);
-    if (!ghostRegistered[_salt] || !ghostActive[_salt]) {
+    bytes32 _identity = _pickIdentity(_identitySeed);
+    if (!ghostRegistered[_identity] || !ghostActive[_identity]) {
       return;
     }
     string memory _key = _pickKey(_keySeed);
     string memory _value = _clear ? "" : _pickValue(_valueSeed);
-    (address _controller, , , ) = registry.profiles(_salt);
+    (address _controller, , , ) = registry.profiles(_identity);
     (uint8 _v, bytes32 _r, bytes32 _s) = vm.sign(
-      controllerKeys[_controller], registry.setTextDigest(_salt, _key, _value)
+      controllerKeys[_controller],
+      registry.setTextDigest(_identity, _key, _value)
     );
-    registry.setTextSigned(_salt, _key, _value, abi.encodePacked(_r, _s, _v));
-    ghostSignedWrites[_salt] += 1;
+    registry.setTextSigned(
+      _identity, _key, _value, abi.encodePacked(_r, _s, _v)
+    );
+    ghostSignedWrites[_identity] += 1;
+  }
+
+  /**
+    Build a batch of zero, one, or two record writes from the cast, any of them
+    possibly a clear.
+
+    @param _keySeed The key selection seed.
+    @param _valueSeed The value selection seed; its low bits pick the clears.
+    @param _size The size selection seed.
+
+    @return _ The record keys.
+    @return _ The record values.
+  */
+  function _batch (
+    uint256 _keySeed,
+    uint256 _valueSeed,
+    uint256 _size
+  ) internal view returns (string[] memory, string[] memory) {
+    uint256 _n = _size % 3;
+    string[] memory _keys = new string[](_n);
+    string[] memory _values = new string[](_n);
+    for (uint256 i = 0; i < _n; ++i) {
+      _keys[i] = _pickKey(uint256(keccak256(abi.encode(_keySeed, i))));
+      _values[i] = (_valueSeed >> i) & 1 == 1 ? "" : _pickValue(
+        uint256(keccak256(abi.encode(_valueSeed, i)))
+      );
+    }
+    return (_keys, _values);
+  }
+
+  /**
+    Write a batch of a registered identity's records by one relayed signature of
+    its controller at the current nonce.
+
+    @param _identitySeed The identity selection seed.
+    @param _keySeed The key selection seed.
+    @param _valueSeed The value selection seed.
+    @param _size The batch size selection seed.
+  */
+  function setTextsSigned (
+    uint256 _identitySeed,
+    uint256 _keySeed,
+    uint256 _valueSeed,
+    uint256 _size
+  ) external {
+    bytes32 _identity = _pickIdentity(_identitySeed);
+    if (!ghostRegistered[_identity] || !ghostActive[_identity]) {
+      return;
+    }
+    (string[] memory _keys, string[] memory _values) = _batch(
+      _keySeed, _valueSeed, _size
+    );
+    (address _controller, , , ) = registry.profiles(_identity);
+    (uint8 _v, bytes32 _r, bytes32 _s) = vm.sign(
+      controllerKeys[_controller],
+      registry.setTextsDigest(_identity, _keys, _values)
+    );
+    registry.setTextsSigned(
+      _identity, _keys, _values, abi.encodePacked(_r, _s, _v)
+    );
+    ghostSignedWrites[_identity] += 1;
+  }
+
+  /**
+    Write a batch of a registered identity's records as its controller.
+
+    @param _identitySeed The identity selection seed.
+    @param _keySeed The key selection seed.
+    @param _valueSeed The value selection seed.
+    @param _size The batch size selection seed.
+  */
+  function setTexts (
+    uint256 _identitySeed,
+    uint256 _keySeed,
+    uint256 _valueSeed,
+    uint256 _size
+  ) external {
+    bytes32 _identity = _pickIdentity(_identitySeed);
+    if (!ghostRegistered[_identity] || !ghostActive[_identity]) {
+      return;
+    }
+    (string[] memory _keys, string[] memory _values) = _batch(
+      _keySeed, _valueSeed, _size
+    );
+    (address _controller, , , ) = registry.profiles(_identity);
+    vm.prank(_controller);
+    registry.setTexts(_identity, _keys, _values);
   }
 
   /**
     Set or clear a registered identity's record as its controller.
 
-    @param _saltSeed The identity selection seed.
+    @param _identitySeed The identity selection seed.
     @param _keySeed The key selection seed.
     @param _valueSeed The value selection seed.
     @param _clear Whether to clear the record instead of setting it.
   */
   function setText (
-    uint256 _saltSeed,
+    uint256 _identitySeed,
     uint256 _keySeed,
     uint256 _valueSeed,
     bool _clear
   ) external {
-    bytes32 _salt = _pickSalt(_saltSeed);
-    if (!ghostRegistered[_salt] || !ghostActive[_salt]) {
+    bytes32 _identity = _pickIdentity(_identitySeed);
+    if (!ghostRegistered[_identity] || !ghostActive[_identity]) {
       return;
     }
-    (address _controller, , , ) = registry.profiles(_salt);
+    (address _controller, , , ) = registry.profiles(_identity);
     string memory _key = _pickKey(_keySeed);
     string memory _value = _clear ? "" : _pickValue(_valueSeed);
     vm.prank(_controller);
-    registry.setText(_salt, _key, _value);
+    registry.setText(_identity, _key, _value);
   }
 
   /**
     Flag a registered identity active or inactive as management, freezing a
     snapshot of it when it goes inactive.
 
-    @param _saltSeed The identity selection seed.
+    @param _identitySeed The identity selection seed.
     @param _active The new active flag.
   */
   function setActive (
-    uint256 _saltSeed,
+    uint256 _identitySeed,
     bool _active
   ) external {
-    bytes32 _salt = _pickSalt(_saltSeed);
-    if (!ghostRegistered[_salt]) {
+    bytes32 _identity = _pickIdentity(_identitySeed);
+    if (!ghostRegistered[_identity]) {
       return;
     }
     vm.prank(management);
-    registry.setActive(_salt, _active);
-    ghostActive[_salt] = _active;
+    registry.setActive(_identity, _active);
+    ghostActive[_identity] = _active;
     if (_active) {
       return;
     }
-    (address _controller, , , ) = registry.profiles(_salt);
-    frozenController[_salt] = _controller;
+    (address _controller, , , ) = registry.profiles(_identity);
+    frozenController[_identity] = _controller;
     for (uint256 i = 0; i < keyList.length; ++i) {
-      frozenTexts[_salt][keyList[i]] = registry.text(_salt, keyList[i]);
+      frozenTexts[_identity][keyList[i]] = registry.text(_identity, keyList[i]);
     }
   }
 

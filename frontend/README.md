@@ -1,8 +1,8 @@
 # Registry frontend
 
 A static, self-contained web client for the Registry. The directory you are
-reading *is* the deployable site: there is no build step, no bundler, and no
-server. Serve these files from anything, or pin them to IPFS.
+reading *is* the deployable site: there is no build step and no server.
+Serve these files from anything, or pin them to IPFS.
 
 ```sh
 cd frontend
@@ -15,70 +15,127 @@ ipfs add -r frontend          # pin the directory; open via any gateway
 
 ## What it does
 
-- **Browse** the directory: read every profile and its text records over your
-  configured RPC. Nothing is written.
-- **Manage** a profile as its controller: set a record with an ordinary
-  transaction (`setText`), or, for a signer that cannot transact (a bare
-  ERC-1271 key), sign the record write (`setTextSigned`) for any relayer to
-  submit. Rotate the controller with an email proof plus the current
-  controller's signature.
-- **Register** a profile: build the exact email command, prove the email
-  locally, and submit.
+- **Browse** the directory: every profile loads as soon as you connect, as a
+  grid of cards with its status, when it must be renewed, its id, its
+  controller, and all of its text records. Every field is the same kind of
+  key and value row; ids and addresses show in full, each with a button that
+  copies it. The search box narrows the grid live to the profiles whose
+  record keys or values, controller, or id contain what you type. Every profile is
+  private; its id says nothing about whose it is. Nothing is written.
+- **Register** a profile: create a profile secret, build the exact subject
+  line, email it, prove the email in this browser, and prepare the
+  registration for broadcast, ideally later.
+- **Manage** a profile as its controller: find it from your email address and
+  secret (computed here, sent nowhere); edit its records in a table, where
+  you change values in place, add records, and clear them, then sign every
+  change at once (`setTextsSigned`); renew it every 90 days, or rotate its
+  controller, with a fresh email proof the current controller signs off on.
+
+Every write takes the two steps below, so the controller only ever signs.
+
+## Every write, in two steps
+
+First the controller signs, and the page shows the complete transaction the
+signature produced: the chain, the Registry, and the calldata, with a plain
+description of what it does under `about`. A registration needs no
+signature, since the proof is its authority, so it goes straight to this
+step. The page simulates the transaction against the chain at once and says
+what it will cost, or why it would fail. Then choose:
+
+- **Copy for a relayer.** Paste it into any relayer or broadcasting service
+  you trust, or carry it to another device. It is a standard transaction
+  request in JSON-RPC form (`chainId`, `to`, a `value` of zero, `data`), so
+  any tool that sends one takes it whole; `about` is for you alone. The
+  transaction carries its own authority, so whoever broadcasts it cannot
+  change what it does.
+- **Broadcast it myself.** Send it from whichever account your wallet has
+  selected when you click. That need not be the account that signed: a
+  funded account with no part in the profile keeps the controller unfunded
+  and unlinked.
+
+A failed simulation never disables the broadcast button, since the chain can
+change before a transaction lands (a DKIM key honored in the meantime, say).
+Every failure, from the simulation, the wallet, or the chain, is decoded from
+the Registry's own errors into what went wrong and what to do about it.
 
 ## Sovereignty
 
 The site makes no network calls of its own. The only endpoints it touches are
-the ones you choose: your RPC (for reads), your wallet (for writes and
-signatures), and the prover artifact location (for proving). ethers and
-snarkjs are vendored under `vendor/`, so nothing is fetched from a CDN at
-runtime. Your email, your keys, and your signatures never leave the browser.
+the ones you choose: your RPC (for reads and simulations) and your wallet
+(for signatures, and for any transaction you broadcast yourself). Your profile
+secret stays in this page and its proving worker. Everything proving needs
+ships in this directory: the input generator (`email-input.js`), the compiled
+circuit (`circuit/`), the prover (`vendor/prover/`, Barretenberg and Noir
+bundled), and the prover's reference points (`crs/`). ethers is vendored under `vendor/` too. Your email, your
+keys, your secret, and your signatures never leave the browser.
 
-Point `rpcUrl` at your own node for the fullest version of this. Everything in
-`config.js` can also be changed at runtime in the Settings panel, which saves
-to this browser only; edit `config.js` to change the defaults for everyone
-before pinning.
+Barretenberg's browser build downloads its reference points from Aztec's CDN.
+The vendored bundle replaces that loader with one that reads `crs/` from this
+site, so proving contacts no third party. The points only serve the prover:
+soundness rests on the verification key baked into the on-chain verifier,
+and wrong points can only produce proofs that fail.
 
-## Local proof generation
+The page asks for one thing before it does anything: an RPC URL, which should
+be your own node, ideally a local one. It checks that the endpoint serves the
+configured chain and that the Registry exists there, then remembers it in
+this browser. Everything else is fixed by `config.js`: the chain id, the
+Registry address, the block the Registry was deployed in, the domain, and the
+domain's DKIM keys. The page shows the chain id and the Registry address
+beside the RPC field and offers no way to change any of them. Edit
+`config.js` before pinning to point the site at another deployment.
 
-Proving runs in a Web Worker (`worker.js`) on your machine. The circuit
-artifacts are large (the ceremony zkey is gigabytes), so they are hosted
-separately rather than shipped here. Set **Prover artifact base** in Settings
-to a location (an IPFS path, a local server, a `file://` directory) that
-holds:
-
-- `email_auth.wasm` — the witness generator, from `make circuits`
-  (`circuits/build/email_auth_js/email_auth.wasm`).
-- `emailauth_final.zkey` — the ceremony proving key, the same file
-  `make zkey-verify` validates. For browsers, a chunked variant is usually
-  needed; see snarkjs's chunked-zkey guidance.
-- `zkemail-input.js` — a UMD script that turns a raw `.eml` into the circuit
-  inputs. It must define `self.zkemailInput.generate(emlText, { command })`
-  returning `{ inputs, meta }`, where `meta` carries the EmailProof scalar
-  fields (`domainName`, `publicKeyHash`, `timestamp`, `maskedCommand`,
-  `emailNullifier`, `accountSalt`, `isCodeExist`). This wraps ZK Email's
-  `relayer-utils` (WASM) for the `email_auth` circuit; it is circuit-specific,
-  which is why it is supplied alongside the artifacts rather than vendored.
-
-When the artifact base is empty, in-browser proving is disabled and the
-**Import Proof** path takes over: prove with the local CLI and paste the
-result. It accepts either a finished `EmailProof` JSON (with `proof` as
-`0x`-hex bytes) or a snarkjs bundle `{ proof: {pi_a,pi_b,pi_c}, publicSignals,
-meta }`, and packs the proof bytes exactly as the on-chain `Verifier` decodes
-them.
+Browse finds every record key from the Registry's `TextChanged` logs, read
+from `deployBlock` onward in spans any node will serve, then reads each value
+from the contract itself. A node that refuses to serve logs still shows the
+default keys.
 
 ## The register flow, end to end
 
-1. Enter the controller address you will hold and build the command. It reads
-   `Set controller to {address} {chainId}:{registry}`, checksummed and bound
-   to this exact deployment.
-2. From your `@ethereum.org` address, email that command to yourself, with
-   your ZK Email invitation code in the body, and export the raw message
-   ("Show original" in Gmail) as `.eml`.
-3. Prove the `.eml` locally (or import a CLI proof). The proof yields your
-   profile id, which is your ZK Email account salt.
-4. Connect any wallet and submit. Whoever submits is irrelevant; the proof is
-   the authority.
+1. Create a profile secret, or paste one you already hold, and save it
+   somewhere safe. Every renewal needs it. Lose it and the profile lapses at
+   its next renewal; register a fresh one then.
+2. Enter the controller address you will hold and build the subject line. It
+   reads `Set controller to 0x{commitment}`, where the commitment binds the
+   controller, this chain, this Registry, and your secret. Nobody without the
+   secret can open it. The controller should be an account with no link to
+   you: it only signs, and never needs funds.
+3. From your `@ethereum.org` address, send an email whose subject is exactly
+   that line, to **another inbox you can read**. The body can be anything.
+   Mail sent to your own address carries no DKIM signature, so it cannot be
+   proven. Open the email in the other inbox and download the original
+   message ("Download original" in Gmail) as `.eml`.
+4. Choose the `.eml` and prove it. Proving runs in a Web Worker on your
+   machine, single-threaded, in under a minute. The page then shows your
+   profile id, the week the proof reveals, and whether the Registry honors
+   the DKIM key that signed the email.
+5. Prepare the registration, then copy it to a relayer or broadcast it
+   yourself from any account. Better, copy it and broadcast it later:
+   whoever reads your mailbox knows when you sent the email, and the chain
+   shows when the proof landed; waiting keeps the two apart. The email stays
+   usable for four weeks. Whoever broadcasts is irrelevant; the proof is the
+   authority.
 
-Records afterward are the controller's, by transaction or by relayed
-signature, and never need another proof. Email is only for registration and
-for rotating the controller.
+Records afterward are the controller's: it signs each batch of changes,
+anyone may broadcast it, and none needs another proof. Email is for registration, for
+renewal every 90 days, and for rotating the controller. A profile that is not
+renewed lapses: it keeps its records, but nothing can write them until a
+fresh email renews it. Once it lapses, anyone may also flag it inactive
+("former EF"), and then it cannot renew at all unless management restores
+it; register a fresh profile instead.
+
+## DKIM keys
+
+The prover needs the public key that signed the email. `config.js` carries
+the domain's keys by selector, exactly as DNS publishes them at
+`<selector>._domainkey.<domain>`, so proving needs no DNS lookup. When the
+domain rotates to a selector the site does not know, its maintainers add the
+new TXT record to `config.js`; until then, an email signed under it cannot be
+proven here. The key only has to be right for the proof to verify; the
+Registry decides which keys it honors.
+
+## Rebuilding the vendored prover
+
+`make frontend-vendor` rebuilds `vendor/prover/` from the pinned packages and
+checks the reference points in `crs/` against their pinned hashes;
+`make vendor` rewrites `circuit/` from the circuit source, and
+`make verifier-check` proves the shipped circuit is the compiled source.

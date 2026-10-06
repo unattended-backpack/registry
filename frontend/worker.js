@@ -1,70 +1,106 @@
-// The proving worker. It runs off the main thread and pulls in snarkjs and the
-// circuit artifacts locally. Nothing here contacts a server on the author's
-// behalf: every URL it loads is one the operator configured (the vendored
-// snarkjs, and the artifact base holding the WASM, the zkey, and the input
-// generator). The raw email text is handled only inside this worker.
+// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
 //
-// The input generator is operator-supplied because it is circuit-specific and
-// WASM-backed (ZK Email's relayer-utils). Place a UMD build at
-// `${artifactBase}/zkemail-input.js` that defines:
+// The proving worker, a module worker. It turns a raw email into an EmailProof
+// entirely on this machine: the input generator, the compiled circuit, the
+// prover, and the proving reference string all ship with this site, so the
+// email never leaves the browser and no third party is contacted.
 //
-//   self.zkemailInput = {
-//     // Parse a raw .eml and build the circom inputs for email_auth, plus the
-//     // scalar fields the EmailProof carries. `command` is the exact command
-//     // the email body must contain, so the generator can locate and mask it.
-//     async generate(emlText, { command }) {
-//       return {
-//         inputs,   // the circom witness inputs object
-//         meta: {
-//           domainName, publicKeyHash, timestamp, maskedCommand,
-//           emailNullifier, accountSalt, isCodeExist
-//         }
-//       };
-//     }
-//   };
+// Proving is single-threaded. Multithreaded WebAssembly needs cross-origin
+// isolation headers that static hosts and IPFS gateways do not send, and the
+// circuit is small enough that one thread proves it in well under a minute.
 
-function report (message) {
-  self.postMessage({ type: "progress", message });
+import {
+  BackendType, Barretenberg, initNoir, Noir, UltraHonkBackend
+} from "./vendor/prover/prover.js";
+import {
+  buildInputs, decodePublicInputs, decodePublicOutputs, signedHeader
+} from "./email-input.js";
+
+// The reference points the prover loads: the circuit's dyadic size, 2^18.
+const SRS_POINTS = 2 ** 18;
+
+const report = (message) => self.postMessage({ type: "progress", message });
+
+let circuit = null;
+
+async function loadCircuit () {
+  if (!circuit) {
+    const response = await fetch(new URL("./circuit/email_proof.json", import.meta.url));
+    if (!response.ok) {
+      throw new Error("Could not load the compiled circuit (circuit/email_proof.json).");
+    }
+    circuit = await response.json();
+  }
+  return circuit;
 }
 
-self.onmessage = async (ev) => {
-  const { emlText, command, artifactBase, snarkjsUrl } = ev.data;
+// Pick the DKIM key for the email's own selector from the configured keys.
+function chooseKey (raw, { domain, keys, key }) {
+  if (key) {
+    return key;
+  }
+  const { tags } = signedHeader(raw, { domain });
+  const known = keys && keys[tags.s];
+  if (!known) {
+    throw new Error(`This site has no DKIM key for the selector "${tags.s}" that signed `
+      + `this email. Its maintainers must add the TXT record at `
+      + `${tags.s}._domainkey.${tags.d} to config.js.`);
+  }
+  return known;
+}
+
+async function prove (request) {
+  report("Reading the email ...");
+  const raw = new Uint8Array(request.eml);
+  const { domain, salt, controller, chainId, registry } = request;
+  if (!registry) {
+    throw new Error("This site's config.js names no Registry address.");
+  }
+  const { inputs, meta } = buildInputs(raw, {
+    key: chooseKey(raw, request), domain, salt, controller, chainId, registry
+  });
+  report(`Solving the circuit for profile ${meta.profileId} ...`);
+  await initNoir();
+  const compiled = await loadCircuit();
+  const { witness, returnValue } = await new Noir(compiled).execute(inputs);
+
+  report("Generating the proof (single-threaded; allow a minute) ...");
+  const started = Date.now();
+  const api = await Barretenberg.new({
+    backend: BackendType.Wasm, threads: 1, srsSize: SRS_POINTS
+  });
   try {
-    report("Loading the prover ...");
-    importScripts(snarkjsUrl);
-    if (typeof self.snarkjs === "undefined") {
-      throw new Error("snarkjs did not load from the vendored bundle.");
+    const backend = new UltraHonkBackend(compiled.bytecode, api);
+    const proofData = await backend.generateProof(witness, { verifierTarget: "evm" });
+    report("Checking the proof ...");
+    if (!(await backend.verifyProof(proofData, { verifierTarget: "evm" }))) {
+      throw new Error("The proof did not verify locally.");
     }
-
-    report("Loading the input generator ...");
-    try {
-      importScripts(`${artifactBase}/zkemail-input.js`);
-    } catch (_) {
-      throw new Error("Could not load zkemail-input.js from the artifact "
-        + "base. See the frontend README for how to host the prover "
-        + "artifacts, or use the Import Proof path.");
+    const decoded = decodePublicInputs(proofData.publicInputs);
+    const expected = decodePublicOutputs(returnValue);
+    for (const k of Object.keys(expected)) {
+      if (decoded[k] !== expected[k]) {
+        throw new Error(`Public output ${k} differs from the circuit's result.`);
+      }
     }
-    if (!self.zkemailInput || typeof self.zkemailInput.generate !== "function") {
-      throw new Error("zkemail-input.js did not define zkemailInput.generate.");
-    }
+    const proof = "0x" + Array.from(proofData.proof,
+      (b) => b.toString(16).padStart(2, "0")).join("");
+    // The sender and the exact time stay here; the page sees only what the
+    // chain will see, plus the profile id the person computed anyway.
+    return {
+      emailProof: { ...decoded, proof },
+      meta: { profileId: meta.profileId, week: meta.week, domain: meta.domain },
+      seconds: (Date.now() - started) / 1000
+    };
+  } finally {
+    await api.destroy();
+  }
+}
 
-    report("Parsing the email and building the witness inputs ...");
-    const { inputs, meta } = await self.zkemailInput.generate(
-      emlText, { command }
-    );
-    if (!meta) {
-      throw new Error("The input generator returned no meta fields.");
-    }
-
-    report("Generating the proof (this can take minutes) ...");
-    const wasmUrl = `${artifactBase}/email_auth.wasm`;
-    const zkeyUrl = `${artifactBase}/emailauth_final.zkey`;
-    const { proof, publicSignals } = await self.snarkjs.groth16.fullProve(
-      inputs, wasmUrl, zkeyUrl
-    );
-
-    report("Proof complete.");
-    self.postMessage({ type: "done", proof, publicSignals, meta });
+self.onmessage = async (event) => {
+  try {
+    const result = await prove(event.data);
+    self.postMessage({ type: "done", ...result });
   } catch (e) {
     self.postMessage({ type: "error", message: e && e.message ? e.message : String(e) });
   }

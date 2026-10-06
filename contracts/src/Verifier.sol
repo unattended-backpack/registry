@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
-import { IGroth16Verifier } from "./interfaces/IGroth16Verifier.sol";
+import { IHonkVerifier } from "./interfaces/IHonkVerifier.sol";
 import { EmailProof, IVerifier } from "./interfaces/IVerifier.sol";
 
 /**
@@ -10,20 +10,23 @@ import { EmailProof, IVerifier } from "./interfaces/IVerifier.sol";
   @author Tim Clancy <tim-clancy.gwei>
   @custom:terry "Is this too much voodoo for the next ten centuries?"
 
-  The immutable ZK Email proof verifier: the Foundation's sovereign
-  replacement for ZK Email's own upgradeable `Verifier`. It packs an
-  `EmailProof` into the public signals of the `email_auth` circuit byte for
-  byte as the upstream contract does (`email-tx-builder` 1.0), then hands them
-  to a fixed snarkjs-generated Groth16 verifier holding the circuit's
-  verifying key. There is no owner, no proxy, and no setter: what this
-  contract verifies on the day it deploys is what it verifies forever.
+  The immutable email proof verifier. It builds the eleven public inputs of the
+  Registry's email circuit (`circuits/`) from an `EmailProof`, in the order the
+  circuit takes them, and hands them to a fixed Barretenberg-generated
+  UltraHonk verifier holding the circuit's verification key. There is no owner,
+  no proxy, and no setter: what this contract verifies on the day it deploys
+  is what it verifies forever.
 
-  Beyond the packing, two defensive caps mirror the check ZK Email performs in
-  its `EmailAuth` contract: a domain or command longer than the circuit's
-  fixed capacity is rejected outright, since bytes beyond that capacity could
-  never have been attested by any proof.
+  The first three inputs bind the email's authorization: the controller, the
+  chain, and the registry. The chain comes from `block.chainid` and the
+  registry from `msg.sender`, so a proof only ever verifies for the registry
+  that asks, on the chain it lives on. The domain packs big-endian into 31-byte
+  field elements, zero-padded; the circuit guarantees every byte inside it is
+  nonzero, and this contract rejects a domain holding a zero byte, so no two
+  domains share a packing. Every other input must already be a canonical field
+  element, so no value aliases another modulo the field.
 
-  @custom:date August 25th, 2026.
+  @custom:date September 30th, 2026.
 */
 contract Verifier is
   IVerifier {
@@ -31,144 +34,130 @@ contract Verifier is
   /// An address was the zero address where a real address is required.
   error ZeroAddress ();
 
-  /// A proof point is not a valid BN254 base field element.
-  error InvalidProofPoints ();
-
   /// The number of field elements the circuit packs the domain into.
-  uint256 public constant DOMAIN_FIELDS = 9;
+  uint256 public constant DOMAIN_FIELDS = 3;
 
-  /// The padded byte capacity of the domain in the circuit.
-  uint256 public constant DOMAIN_BYTES = 255;
+  /// The maximum byte length of a domain in the circuit.
+  uint256 public constant DOMAIN_BYTES = 93;
 
-  /// The number of field elements the circuit packs the command into.
-  uint256 public constant COMMAND_FIELDS = 20;
+  /// The number of public inputs the circuit takes.
+  uint256 public constant PUBLIC_INPUTS = 11;
 
-  /// The maximum byte length of a command in the circuit.
-  uint256 public constant COMMAND_BYTES = 605;
+  /// The BN254 scalar field modulus. Every public input must lie below it.
+  uint256 internal constant R =
+    21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
-  /**
-    The BN254 base field modulus. Proof points are curve coordinates and must
-    lie below it.
-  */
-  uint256 internal constant Q =
-    0x30644E72E131A029B85045B68181585D97816A916871CA8D3C208C16D87CFD47;
-
-  /// The fixed Groth16 verifier holding the circuit's verifying key.
-  IGroth16Verifier public immutable groth16Verifier;
+  /// The fixed UltraHonk verifier holding the circuit's verification key.
+  IHonkVerifier public immutable honkVerifier;
 
   /**
-    Construct the verifier against a Groth16 verifier.
+    Construct the verifier against an UltraHonk verifier.
 
-    @param _groth16Verifier The snarkjs-generated Groth16 verifier holding the
-      `email_auth` circuit's verifying key.
+    @param _honkVerifier The Barretenberg-generated UltraHonk verifier holding
+      the email circuit's verification key.
   */
   constructor (
-    address _groth16Verifier
+    address _honkVerifier
   ) {
-    if (_groth16Verifier == address(0)) {
+    if (_honkVerifier == address(0)) {
       revert ZeroAddress();
     }
-    groth16Verifier = IGroth16Verifier(_groth16Verifier);
+    honkVerifier = IHonkVerifier(_honkVerifier);
   }
 
   /**
-    Pack bytes into 31-byte little-endian field elements, exactly as the circuit
-    packs its string inputs and exactly as ZK Email's upstream `Verifier` does.
+    Check that a domain fits the circuit: no longer than its capacity, and free
+    of zero bytes.
 
-    @param _bytes The bytes to pack.
-    @param _paddedSize The circuit's fixed byte capacity for this input.
+    @param _bytes The domain's bytes.
 
-    @return _ The packed field elements.
+    @return _ Whether the domain fits.
   */
-  function _packBytes2Fields (
-    bytes memory _bytes,
-    uint256 _paddedSize
-  ) internal pure returns (uint256[] memory) {
-    uint256 _remain = _paddedSize % 31;
-    uint256 _numFields = (_paddedSize - _remain) / 31;
-    if (_remain > 0) {
-      _numFields += 1;
+  function _fits (
+    bytes memory _bytes
+  ) internal pure returns (bool) {
+    if (_bytes.length > DOMAIN_BYTES) {
+      return false;
     }
-    uint256[] memory _fields = new uint256[](_numFields);
-    uint256 _idx = 0;
-    uint256 _byteVal = 0;
-    for (uint256 i = 0; i < _numFields; ++i) {
-      for (uint256 j = 0; j < 31; ++j) {
-        _idx = i * 31 + j;
-        if (_idx >= _paddedSize) {
-          break;
-        }
-        if (_idx >= _bytes.length) {
-          _byteVal = 0;
-        } else {
-          _byteVal = uint256(uint8(_bytes[_idx]));
-        }
-        if (j == 0) {
-          _fields[i] = _byteVal;
-        } else {
-          _fields[i] += (_byteVal << (8 * j));
-        }
+    for (uint256 i = 0; i < _bytes.length; ++i) {
+      if (_bytes[i] == 0) {
+        return false;
       }
     }
-    return _fields;
+    return true;
   }
 
   /**
-    Retrieve the maximum length in bytes of a command the circuit can carry.
+    Build the circuit's public inputs, in the circuit's order: the controller,
+    the chain ID, the registry, the domain (three fields), the key hash, the
+    nullifier, the timestamp, and the profile ID as high and low 128-bit halves.
 
-    @return _ The maximum command length in bytes.
+    @param _proof The email proof.
+    @param _controller The controller the email must authorize.
+    @param _chainId The chain the email must authorize.
+    @param _registry The registry the email must authorize.
+
+    @return _ The public inputs.
   */
-  function commandBytes () external pure returns (uint256) {
-    return COMMAND_BYTES;
+  function publicInputs (
+    EmailProof calldata _proof,
+    address _controller,
+    uint256 _chainId,
+    address _registry
+  ) public pure returns (bytes32[] memory) {
+    bytes32[] memory _inputs = new bytes32[](PUBLIC_INPUTS);
+    _inputs[0] = bytes32(uint256(uint160(_controller)));
+    _inputs[1] = bytes32(_chainId);
+    _inputs[2] = bytes32(uint256(uint160(_registry)));
+    bytes memory _domain = bytes(_proof.domainName);
+    for (uint256 i = 0; i < DOMAIN_FIELDS; ++i) {
+      uint256 _acc = 0;
+      for (uint256 j = 0; j < 31; ++j) {
+        uint256 _k = i * 31 + j;
+        uint256 _byte = _k < _domain.length ? uint256(uint8(_domain[_k])) : 0;
+        _acc = (_acc << 8) | _byte;
+      }
+      _inputs[3 + i] = bytes32(_acc);
+    }
+    _inputs[6] = _proof.publicKeyHash;
+    _inputs[7] = _proof.emailNullifier;
+    _inputs[8] = bytes32(_proof.timestamp);
+    _inputs[9] = bytes32(uint256(_proof.profileId) >> 128);
+    _inputs[10] = bytes32(uint256(uint128(uint256(_proof.profileId))));
+    return _inputs;
   }
 
   /**
-    Verify an email proof: pack its claims into the circuit's public signals and
-    verify the Groth16 proof against them. Claims longer than the circuit's
-    fixed capacity are rejected outright.
+    Verify an email proof for the calling registry on the current chain: build
+    the circuit's public inputs and verify the UltraHonk proof against them.
+    Claims the circuit could never have produced (an oversized or zero-holding
+    domain, values outside the field) are rejected outright, and a verifier
+    revert reads as invalid.
 
     @param _proof The email proof to verify.
+    @param _controller The controller the email's subject must authorize.
 
     @return _ Whether the proof is valid.
   */
   function verifyEmailProof (
-    EmailProof calldata _proof
+    EmailProof calldata _proof,
+    address _controller
   ) external view returns (bool) {
     if (
-      bytes(_proof.domainName).length > DOMAIN_BYTES
-      || bytes(_proof.maskedCommand).length > COMMAND_BYTES
+      !_fits(bytes(_proof.domainName)) || uint256(_proof.publicKeyHash) >= R
+      || uint256(_proof.emailNullifier) >= R || _proof.timestamp >= R
     ) {
       return false;
     }
-    (uint256[2] memory _pA, uint256[2][2] memory _pB, uint256[2] memory _pC) =
-    abi.decode(
-      _proof.proof, (uint256[2], uint256[2][2], uint256[2])
-    );
-    if (
-      _pA[0] >= Q || _pA[1] >= Q || _pB[0][0] >= Q || _pB[0][1] >= Q
-      || _pB[1][0] >= Q || _pB[1][1] >= Q || _pC[0] >= Q || _pC[1] >= Q
-    ) {
-      revert InvalidProofPoints();
+    try honkVerifier.verify(
+      _proof.proof, publicInputs(
+        _proof, _controller, block.chainid, msg.sender
+      )
+    ) returns (bool _valid) {
+      return _valid;
+    } catch {
+      return false;
     }
-    uint256[DOMAIN_FIELDS + COMMAND_FIELDS + 5] memory _pubSignals;
-    uint256[] memory _fields =
-      _packBytes2Fields(bytes(_proof.domainName), DOMAIN_BYTES);
-    for (uint256 i = 0; i < DOMAIN_FIELDS; ++i) {
-      _pubSignals[i] = _fields[i];
-    }
-    _pubSignals[DOMAIN_FIELDS] = uint256(_proof.publicKeyHash);
-    _pubSignals[DOMAIN_FIELDS + 1] = uint256(_proof.emailNullifier);
-    _pubSignals[DOMAIN_FIELDS + 2] = _proof.timestamp;
-    _fields = _packBytes2Fields(bytes(_proof.maskedCommand), COMMAND_BYTES);
-    for (uint256 i = 0; i < COMMAND_FIELDS; ++i) {
-      _pubSignals[DOMAIN_FIELDS + 3 + i] = _fields[i];
-    }
-    _pubSignals[DOMAIN_FIELDS + 3 + COMMAND_FIELDS] = uint256(
-      _proof.accountSalt
-    );
-    uint256 _codeExists = _proof.isCodeExist ? 1 : 0;
-    _pubSignals[DOMAIN_FIELDS + 4 + COMMAND_FIELDS] = _codeExists;
-    return groth16Verifier.verifyProof(_pA, _pB, _pC, _pubSignals);
   }
 }
 

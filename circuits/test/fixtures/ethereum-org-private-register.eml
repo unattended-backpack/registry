@@ -1,0 +1,118 @@
+Delivered-To: tim@rockhopper.us
+Received: by 2002:a05:7508:298a:b0:f6:2001:a20 with SMTP id eq10csp1367518gbb;
+        Wed, 30 Sep 2026 12:53:08 -0700 (PDT)
+X-Received: by 2002:a05:6402:5d3:b0:6ac:b9c6:ea36 with SMTP id 4fb4d7f45d1cf-6ae19964658mr1796669a12.38.1790797987972;
+        Wed, 30 Sep 2026 12:53:07 -0700 (PDT)
+ARC-Seal: i=2; a=rsa-sha256; t=1790797987; cv=pass;
+        d=google.com; s=arc-20260327;
+        b=eDeHTTMHVyvQNDFEb19+BSM8mPrl7wJcIzsLjy69nNhdi90B1TelOrjrFQwiCikwM2
+         aePdVdUId9rau/MtvKKDkHZfQDbA2fxJYz8LdaRTg2W7hwbkcn93X/EedjmY2U1RA1ep
+         x/hSwVJktr/KfpOs5nUmHY4qYMNMNVaZfllj9ukA9GmW2YMPFSlAmyyqOSRW/4OndaD3
+         eO10UpG32xDLxKzNh51WugDzH1wlEueETQNp/EUyIhvo5iQCgtJi/jSwkJeGKoXw8t2G
+         VWFY8tLzRVpIJKxj9k0gMqy100R6QYdPiSj51l0s8MIxwYuSq1kSnWc8grc1796Zthlp
+         v1tg==
+ARC-Message-Signature: i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=to:subject:message-id:date:from:mime-version:dkim-signature;
+        bh=7cyBkVxSHlhncrJpRaoVb8xpDG28ecc719hgJtb88xU=;
+        fh=tBO5EUOeWeWFmD76Xtr2eUnAR0gFO5cDYfGbalTym54=;
+        b=UvYuU/QTpdDYxCxynHLgUWyuLMowvqXrQEYYLmaMKaUZwfln5+fdCTgzOS6U/WoT25
+         3Z+0S/DAc4p1UvLxNW9HASHhgi15uElqn8+qz4PxuGVvFA9SXUfwJ11A6ak8UfDUkJuZ
+         Y5BVlXTRIHVQgsRfwGkqgQwIyJyrKepPUqGs+XkMqpNQCQwcnUYhgdGZvbey1f7+GdDh
+         nvE2vrqZtrWiyoJCOIQSvhJt33ZaGeIjLojFG+xHj/J9UiKW8CpoYQDEtwZt3bKQMyPe
+         Am0RtXJzz0SuVjP18LGPv5gwbOA3XagsjPnIaPsUeZMB5sJDEOAiuaUdl+eoD3zlela2
+         1tEA==;
+        dara=google.com
+ARC-Authentication-Results: i=2; mx.google.com;
+       dkim=pass header.i=@ethereum.org header.s=gmail header.b=CuunykUy;
+       arc=pass (i=1);
+       spf=pass (google.com: domain of tim.clancy@ethereum.org designates 209.85.220.41 as permitted sender) smtp.mailfrom=tim.clancy@ethereum.org;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=ethereum.org;
+       dara=neutral header.i=@rockhopper.us
+Return-Path: <tim.clancy@ethereum.org>
+Received: from mail-sor-f41.google.com (mail-sor-f41.google.com. [209.85.220.41])
+        by mx.google.com with SMTPS id 4fb4d7f45d1cf-6ae6fd49903sor19984a12.3.2026.09.30.12.53.07
+        for <tim@rockhopper.us>
+        (Google Transport Security);
+        Wed, 30 Sep 2026 12:53:07 -0700 (PDT)
+Received-SPF: pass (google.com: domain of tim.clancy@ethereum.org designates 209.85.220.41 as permitted sender) client-ip=209.85.220.41;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@ethereum.org header.s=gmail header.b=CuunykUy;
+       arc=pass (i=1);
+       spf=pass (google.com: domain of tim.clancy@ethereum.org designates 209.85.220.41 as permitted sender) smtp.mailfrom=tim.clancy@ethereum.org;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=ethereum.org;
+       dara=neutral header.i=@rockhopper.us
+ARC-Seal: i=1; a=rsa-sha256; t=1790797987; cv=none;
+        d=google.com; s=arc-20260327;
+        b=gJRS3myMtfz8VBTdY8o206ROi8r15HYM6E/r0YM11mk8W9EhWpQfBnqjknhCIjeyld
+         KrLN1FrhqUKoH9etANz26EeIiBB+RJkK7P/2wr/mk3ljh5e1xQuIIXHkHj6xLW47Od5d
+         ZB6mUfda8c3OLP4I1pToRq16uoFiGly67dJ0jkAxUb4TUEzsKGHNyiY2Bbdvdmv9mmC2
+         io90ENVI7pyA9cWY9oY4kBcZCBAIB1Mz9GURB6rdnekgrkah6s4qLsxu90vf+d+Rd5rS
+         keRkCMoVuw7bbv0q+qXDuih+3hsDENnLlrfi66vEpfMCpMkQ+XIXR/okhRJssy0hn4RJ
+         HPIA==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=to:subject:message-id:date:from:mime-version:dkim-signature;
+        bh=7cyBkVxSHlhncrJpRaoVb8xpDG28ecc719hgJtb88xU=;
+        fh=tBO5EUOeWeWFmD76Xtr2eUnAR0gFO5cDYfGbalTym54=;
+        b=DGwPl0i8EjRXuE4+8r8oM2h865/kkOkPUmtaAU0qvoAoRjesTObwhXuHSpZ6YYekUA
+         EfreNwovpU2XXD6n5ZcgXNc+nj50pi1l0SxrVvcp7qEwA6buJ0S340J33TSNMiLlvY/m
+         K8LefKYoa7y6GPixd3vX0V4bUvSlNGEzijyoB4b51h7LjFzvfuFQz/VjSDsaZGiI4rtX
+         SOMWMtx1/cUXSPqYxySZaZLZQhpsAbRGThY3g8EOKp1sEIdiO4E2DFZZrwuUsjQiE1zK
+         2fq4H/+fx29BethDqBdo/+fDiG+wb9TUE3VgX1Ybjc/fi7ZDdqN3OKYLMZriY2iijsPC
+         qrzQ==;
+        darn=rockhopper.us
+ARC-Authentication-Results: i=1; mx.google.com; arc=none
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=ethereum.org; s=gmail; t=1790797987; x=1791402787; darn=rockhopper.us;
+        h=content-type:to:subject:message-id:date:from:mime-version:from:to
+         :cc:subject:date:message-id:reply-to:content-type;
+        bh=7cyBkVxSHlhncrJpRaoVb8xpDG28ecc719hgJtb88xU=;
+        b=CuunykUyoROTEuvItKwd+uI/uGNqcE5S848o/OKJNrPWDvdq+LSJWTCftyLwt4PdGM
+         2PhhctAVnbN2nhTsXCpYpWGpEdDBA76/jSRL2PGcqzW42j9xK/HHgZYioNHGqhXFgFIj
+         A4fLsdMTt68pXBr85ebPw3UJUBAVb+nSPQG2kyI+hmMoVXzxtP4v0Gpf20kdTJHzWOgo
+         8uJ8aKiwTh3p+3cDi8BfN2zaorl5A3DEmtxNXgkm044h06SLikEiFezDkd2xB1Xiw7n4
+         5QAqmMvFAv0TQaGj4RkQpSQiMtIsnxit0cxuYv8UfozjrXekXZ8iVmnzsX4N1xHAzgez
+         COGA==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=1e100.net; s=20260707; t=1790797987; x=1791402787;
+        h=content-type:to:subject:message-id:date:from:mime-version:x-gm-gg
+         :x-gm-message-state:from:to:cc:subject:date:message-id:reply-to
+         :content-type;
+        bh=7cyBkVxSHlhncrJpRaoVb8xpDG28ecc719hgJtb88xU=;
+        b=En9LTXM2OZnu0tPRrIgYrKfNhwRoBO6sXK/xM36vnOEVt5eX0hvw5F2s2YOF02EfoM
+         lfOj9PIE7GTcyC55i3Ab9ZVRbBGJXIncYRapSRZMniQA+U/q8i43g45TCC2wnB3zOCH2
+         IS8kru8GcyOynMRjb17FhNCORx0fywiMwvvGLCdTtDKoYocTQaxFTYjDFcF2EP844+JW
+         iOc+JAN0QRY7wz8alcAnVY2MOZ0u5pG0CooT/c6FCIDZLBGyjmCfPO1I0Ln4VaHnUxEP
+         upll9HOpBT92euY8Va0lvS3Vsim9PlijZrzq1mMKwsyfJ9qDq90TibYrcN/ww+KZK0uN
+         VhQw==
+X-Gm-Message-State: AFq9FYIM80bEw+0y11gkDM1viODwD3SGL4I4mvu7VcvQYDO48xJC6fBk
+	0BNsup8InQ+ou97cCz9OVMqlk0Pet55+CHXKE7PRqFWPfbmKUeAoQ8dqUGa5+i/hCYOq00lQxUn
+	YKZ9SJr7WCHrP/rHKbSlrbIeo9MreIWE7P1LvKGYBZstTBJlCgf8PeVc=
+X-Gm-Gg: AYBFou2DqCbkrMa4AVGQZ0sMnD9LOpUq97RGRloTt6/ZY11ErXdXuTiKx9ICR4j01yb
+	8LQ+jLx5AzZ05IAE3NdNN0vYPjQYAzwF0/R/rZg/+zZLmYymA/xyq/SUH6vbThMAK7EYPg0Ad+t
+	Z1XZhI44hiSIdjeK6g1hCoeh7Cx+QIktlS3YZD6dQvuvaMNVzcJoGzvtAAhlV+evZFlnDXKIGSz
+	+zTQL1u3Mwj9Usq6ilCasY63dRP6yHDxuYPFuhbUxs2RulYQar+vj47HSE+mQks7h/8N/5JxH+l
+	ZwexcOl8Hf+cRYsvYtUHY+mfVAEhrHrpbmHsQnKZXNcZ9Ly4Yx6A8rSef4bnTjVa0mWv9M5w/ya
+	v7kDRW3Pfp4HKshp5Mszyeryu2ghgKLHP35Bhis/6JxAOkHKlROmn
+X-Received: by 2002:a05:6402:320d:b0:6ad:723:1d6c with SMTP id
+ 4fb4d7f45d1cf-6ae198de0fcmr2410785a12.2.1790797987292; Wed, 30 Sep 2026
+ 12:53:07 -0700 (PDT)
+MIME-Version: 1.0
+From: Tim Clancy <tim.clancy@ethereum.org>
+Date: Wed, 30 Sep 2026 15:52:56 -0400
+X-Gm-Features: AclHuK_AoJcjG_Degz91wFN9NWg3JLtiauH80gevdxZRHFdvRGfv3pjQB7m0FLs
+Message-ID: <CAD5LUwtccPJOx654GTWGpnRguknKwthOT+3ecc2MkzUogv04eg@mail.gmail.com>
+Subject: Set controller to 0x99b5ace5d3ce8c1028d511503ef017056620e25ea6864f56cc94e68847f48af8
+To: Tim Clancy <tim@rockhopper.us>
+Content-Type: multipart/alternative; boundary="000000000000e5ba5b065cb8a59d"
+
+--000000000000e5ba5b065cb8a59d
+Content-Type: text/plain; charset="UTF-8"
+
+
+
+--000000000000e5ba5b065cb8a59d
+Content-Type: text/html; charset="UTF-8"
+
+<div dir="ltr"><br></div>
+
+--000000000000e5ba5b065cb8a59d--
