@@ -1,0 +1,15 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=ethereum.org;
+ h=Subject: Message-ID: Date: To: From; q=dns/txt; s=test; t=1790381236;
+ bh=VS52G+IiuvOZtLBBTO1nk8dQHe1k9Xm/SFUdPo+RSO4=;
+ b=ckjAeafM4ciHluXj+LFuJPa2YSNzsMDjith3/LltZwlKrW0qfnFhBkjWF+qVq+k/v4b33XXh2
+ 7JpgmnUulq0F8tecTruYrXm2AVi/yf2YICNdwMht9PR/81R9MeMdkxXxQpnQA/kPLlt1y/XTqyX
+ wh6hLaD4is2aWhh8gDAqaMtblmPCue1rcK6xiYSFWsz4t20xijWozeY98xt66BU/JPnWoIES06R
+ D3+ibCFhkFs4Mi4qeHWdzDF+dIVeKBkEjkul+vBjnSMDCoqeR6XhphcAAyHDZOhL1QFEoTQefue
+ cTwmUFqppkboSSSGRKstvnNbg7QnahQt2YyieNpbegXw==
+From: Alice <alice@ethereum.org>
+To: alice@example.net
+Date: Sat, 26 Sep 2026 00:07:16 GMT
+Message-ID: <synthetic-synthetic-renew@ethereum.org>
+Subject: Set controller to 0x99b5ace5d3ce8c1028d511503ef017056620e25ea6864f56cc94e68847f48af8
+
+A synthetic Registry test email.

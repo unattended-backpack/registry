@@ -1,14 +1,13 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
 import { ICreateX } from "../src/interfaces/ICreateX.sol";
 import { EmailProof } from "../src/interfaces/IVerifier.sol";
 import { Registry } from "../src/Registry.sol";
-import { Groth16Verifier } from "../src/vendor/Groth16Verifier.sol";
+import { HonkVerifier } from "../src/vendor/HonkVerifier.sol";
 import { Verifier } from "../src/Verifier.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { Test } from "forge-std/Test.sol";
-import { LibString } from "solady/utils/LibString.sol";
 
 /**
   @custom:benediction DEVS BENEDICAT ET PROTEGAT CONTRACTVM MEVM
@@ -16,27 +15,24 @@ import { LibString } from "solady/utils/LibString.sol";
   @author Tim Clancy <tim-clancy.gwei>
   @custom:terry "Is this too much voodoo for the next ten centuries?"
 
-  A mainnet fork test suite validating CREATE3 deployment of the Registry and
-  of the immutable verifier pair through the real CreateX factory, and that
-  the deployed bytecode runs an email registration end to end. ZK Email
-  publishes no mainnet verifier, so the registry tests run against a mock
-  verifier deployed onto the fork; the policy around it is the unit suite's
-  business.
+  A fork test suite rehearsing deployment on the chain `RPC_URL` names, the
+  same chain the deployment goals target: CREATE3 deployment of the Registry
+  and of the immutable verifier pair through the real CreateX factory, and an
+  email registration end to end on the deployed bytecode. A real email
+  binds one chain and one registry address, so the registration test runs
+  against a mock verifier deployed onto the fork; the real verifier pair is
+  checked against a real proof directly.
 
-  Every test skips unless `MAINNET_RPC_URL` is set (an ordinary mainnet RPC
-  suffices to fork the latest block; pinning `MAINNET_FORK_BLOCK` to an older
-  block requires an archive node).
+  Every test skips unless `RPC_URL` is set (an ordinary RPC suffices to fork
+  the latest block; pinning `FORK_BLOCK` to an older block requires an archive
+  node).
 
-  @custom:date August 21st, 2026.
+  @custom:date October 5th, 2026.
 */
 contract RegistryForkTest is
   Test {
 
-  using LibString for address;
-
-  using LibString for uint256;
-
-  /// The CreateX factory on Ethereum mainnet.
+  /// The CreateX factory, at the same address on every chain it serves.
   address internal constant CREATEX =
     0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed;
 
@@ -46,7 +42,11 @@ contract RegistryForkTest is
   /// A DKIM key hash management honors for the domain.
   bytes32 internal constant KEY_HASH = keccak256("ethereum.org dkim key");
 
-  /// The mainnet RPC URL fork tests run against; empty skips the suite.
+  /// The registry address the proof vectors bind, on anvil's chain.
+  address internal constant BOUND_REGISTRY =
+    0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0;
+
+  /// The RPC URL of the chain fork tests run against; empty skips the suite.
   string internal forkUrl;
 
   /// The mock proof verifier, deployed onto the fork.
@@ -58,19 +58,19 @@ contract RegistryForkTest is
   /// A wallet Alice binds as her controller.
   address internal aliceWallet = makeAddr("aliceWallet");
 
-  /// Skip the test unless a mainnet fork RPC is configured.
+  /// Skip the test unless a fork RPC is configured.
   modifier onlyForked () {
     vm.skip(bytes(forkUrl).length == 0);
     _;
   }
 
-  /// Fork mainnet and deploy the mock verifier onto it.
+  /// Fork the deployment chain and deploy the mock verifier onto it.
   function setUp () public {
-    forkUrl = vm.envOr("MAINNET_RPC_URL", string(""));
+    forkUrl = vm.envOr("RPC_URL", string(""));
     if (bytes(forkUrl).length == 0) {
       return;
     }
-    string memory _forkBlock = vm.envOr("MAINNET_FORK_BLOCK", string(""));
+    string memory _forkBlock = vm.envOr("FORK_BLOCK", string(""));
     if (bytes(_forkBlock).length == 0) {
       vm.createSelectFork(forkUrl);
     } else {
@@ -122,27 +122,22 @@ contract RegistryForkTest is
   /// The CreateX-deployed bytecode registers a profile by email end to end.
   function test_fork_emailRegistration () public onlyForked {
     Registry _registry = _deploy();
-    bytes32 _alice = keccak256("alice@ethereum.org|code");
-    string memory _command =
-      string.concat(
-        "Set controller to ", aliceWallet.toHexStringChecksummed(), " ",
-        block.chainid.toString(), ":",
-        address(_registry).toHexStringChecksummed()
-      );
+    bytes32 _alice = keccak256("alice's private profile");
     EmailProof memory _p = EmailProof({
       domainName: "ethereum.org",
       publicKeyHash: KEY_HASH,
       timestamp: block.timestamp,
-      maskedCommand: _command,
       emailNullifier: keccak256("fork email"),
-      accountSalt: _alice,
-      isCodeExist: true,
-      proof: "valid"
+      profileId: _alice,
+      proof: abi.encode(
+        keccak256("valid"), aliceWallet, block.chainid, address(_registry)
+      )
     });
     _registry.register(_p, aliceWallet);
     (address _controller, bool _active, , ) = _registry.profiles(_alice);
     assertEq(_controller, aliceWallet);
     assertTrue(_active);
+    assertTrue(_registry.isActive(_alice));
     vm.prank(aliceWallet);
     _registry.setText(_alice, "url", "https://alice.example");
     assertEq(_registry.text(_alice, "url"), "https://alice.example");
@@ -156,22 +151,47 @@ contract RegistryForkTest is
   }
 
   /**
-    The immutable verifier pair deploys through the real CreateX factory, and
-    its real pairing check rejects a proof that is not a proof.
+    The immutable verifier pair deploys through the real CreateX factory,
+    accepts a real proof for the registry and chain it binds, and, behind a
+    registry it does not bind, refuses it.
   */
   function test_fork_verifierDeployment () public onlyForked {
-    address _groth16 =
+    address _honk =
       ICreateX(CREATEX).deployCreate3(
-        keccak256("registry.fork.groth16"), type(Groth16Verifier).creationCode
+        keccak256("registry.fork.honk"), type(HonkVerifier).creationCode
       );
     address _immutableVerifier =
       ICreateX(CREATEX).deployCreate3(
         keccak256("registry.fork.verifier"),
-        abi.encodePacked(type(Verifier).creationCode, abi.encode(_groth16))
+        abi.encodePacked(type(Verifier).creationCode, abi.encode(_honk))
       );
     Verifier _v = Verifier(_immutableVerifier);
-    assertEq(address(_v.groth16Verifier()), _groth16);
-    assertEq(_v.commandBytes(), 605);
+    assertEq(address(_v.honkVerifier()), _honk);
+    string memory _json =
+      vm.readFile("../circuits/test/vectors/synthetic-register.proof.json");
+    EmailProof memory _real = EmailProof({
+      domainName: vm.parseJsonString(_json, ".domainName"),
+      publicKeyHash: vm.parseJsonBytes32(_json, ".publicKeyHash"),
+      timestamp: vm.parseJsonUint(_json, ".timestamp"),
+      emailNullifier: vm.parseJsonBytes32(_json, ".emailNullifier"),
+      profileId: vm.parseJsonBytes32(_json, ".profileId"),
+      proof: vm.parseJsonBytes(_json, ".proof")
+    });
+    address _controller = vm.parseJsonAddress(_json, ".controller");
+
+    /*
+      The proof binds anvil's chain and its demo registry; as that registry, on
+      that chain, it verifies.
+    */
+    uint256 _forked = block.chainid;
+    vm.chainId(31337);
+    vm.prank(BOUND_REGISTRY);
+    assertTrue(
+      _v.verifyEmailProof(_real, _controller), "a real proof verifies"
+    );
+    vm.chainId(_forked);
+
+    // A registry on the forked chain refuses it: it binds another deployment.
     Registry _registry =
       Registry(
         ICreateX(CREATEX).deployCreate3(
@@ -183,23 +203,10 @@ contract RegistryForkTest is
         )
       );
     vm.prank(management);
-    _registry.setDKIMPublicKeyHash(KEY_HASH, true);
-    uint256[2] memory _pA = [uint256(1), uint256(2)];
-    uint256[2][2] memory _pB =
-      [[uint256(1), uint256(2)], [uint256(3), uint256(4)]];
-    uint256[2] memory _pC = [uint256(1), uint256(2)];
-    EmailProof memory _p = EmailProof({
-      domainName: "ethereum.org",
-      publicKeyHash: KEY_HASH,
-      timestamp: block.timestamp,
-      maskedCommand: _registry.setControllerCommand(aliceWallet),
-      emailNullifier: keccak256("fork verifier email"),
-      accountSalt: keccak256("alice@ethereum.org|code"),
-      isCodeExist: true,
-      proof: abi.encode(_pA, _pB, _pC)
-    });
+    _registry.setDKIMPublicKeyHash(_real.publicKeyHash, true);
+    vm.warp(_real.timestamp + 1 days);
     vm.expectRevert(Registry.InvalidEmailProof.selector);
-    _registry.register(_p, aliceWallet);
+    _registry.register(_real, _controller);
   }
 }
 

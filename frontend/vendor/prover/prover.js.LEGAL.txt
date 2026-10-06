@@ -1,0 +1,11 @@
+Bundled license information:
+
+comlink/dist/esm/comlink.mjs:
+  /**
+   * @license
+   * Copyright 2019 Google LLC
+   * SPDX-License-Identifier: Apache-2.0
+   */
+
+pako/dist/pako.esm.mjs:
+  /*! pako 2.2.0 https://github.com/nodeca/pako @license (MIT AND Zlib) */

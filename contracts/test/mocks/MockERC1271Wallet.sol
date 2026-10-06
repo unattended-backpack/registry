@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
 import { ECDSA } from "solady/utils/ECDSA.sol";
@@ -13,7 +13,7 @@ import { ECDSA } from "solady/utils/ECDSA.sol";
   ERC-1271 signature checks exactly when the signature is a valid ECDSA
   signature from its underlying owner key.
 
-  @custom:date August 25th, 2026.
+  @custom:date September 25th, 2026.
 */
 contract MockERC1271Wallet {
 

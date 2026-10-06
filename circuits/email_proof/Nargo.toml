@@ -1,0 +1,8 @@
+[package]
+name = "email_proof"
+type = "bin"
+authors = ["Tim Clancy"]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+registry_email = { path = "../lib" }

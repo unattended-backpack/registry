@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
 import { EmailProof } from "../src/interfaces/IVerifier.sol";
@@ -15,18 +15,16 @@ import { LibString } from "solady/utils/LibString.sol";
   @custom:terry "Is this too much voodoo for the next ten centuries?"
 
   The test suite for the Registry, run against a mock verifier that accepts
-  exactly the proofs a test marks valid, so every policy check the registry
-  performs itself (domain, key hashes, nullifier, timestamp, command, binding,
-  account code, controller signature, nonce, active flag) is exercised in
+  exactly the proofs a test builds for a given controller, chain, and
+  registry, so every policy check the registry performs itself (domain, key
+  hashes, nullifier, email lifetime, timestamp order, controller binding,
+  controller signature, nonce, revocation, lapse and renewal) is exercised in
   isolation from the circuit.
 
-  @custom:date August 25th, 2026.
+  @custom:date October 1st, 2026.
 */
 contract RegistryTest is
   Test {
-
-  using LibString for address;
-
   using LibString for uint256;
 
   /// The pinned email domain.
@@ -35,14 +33,16 @@ contract RegistryTest is
   /// A DKIM key hash management honors for the domain.
   bytes32 internal constant KEY_HASH = keccak256("ethereum.org dkim key");
 
-  /// Alice's identity: her account salt.
-  bytes32 internal constant ALICE = keccak256("alice@ethereum.org|code");
+  /// Alice's identity: the hash of her address. Immutable, not constant:
+  /// a constant would re-call the SHA-256 precompile at every use, and that
+  /// call would consume the next prank or expected revert.
+  bytes32 internal immutable ALICE = sha256("alice@ethereum.org");
 
-  /// Bob's identity: his account salt.
-  bytes32 internal constant BOB = keccak256("bob@ethereum.org|code");
+  /// Bob's identity: the hash of his address.
+  bytes32 internal immutable BOB = sha256("bob@ethereum.org");
 
-  /// Carol's identity: her account salt.
-  bytes32 internal constant CAROL = keccak256("carol@ethereum.org|code");
+  /// Carol's identity: the hash of her address.
+  bytes32 internal immutable CAROL = sha256("carol@ethereum.org");
 
   /// The mock proof verifier.
   MockVerifier internal verifier;
@@ -85,61 +85,60 @@ contract RegistryTest is
   }
 
   /**
-    Build an email proof the mock verifier accepts, with a fresh nullifier.
+    Build the mock proof bytes authorizing a controller on a registry and chain.
 
-    @param _salt The sender's account salt.
-    @param _command The command the email carries.
-    @param _timestamp The DKIM timestamp of the email.
-    @param _code Whether the email carries the account code.
+    @param _controller The controller the email authorizes.
+    @param _chainId The chain the email authorizes.
+    @param _registry The registry the email authorizes.
+
+    @return _ The proof bytes.
+  */
+  function _proofBytes (
+    address _controller,
+    uint256 _chainId,
+    address _registry
+  ) internal pure returns (bytes memory) {
+    return abi.encode(keccak256("valid"), _controller, _chainId, _registry);
+  }
+
+  /**
+    Build an email proof the mock verifier accepts for the registry under test,
+    with a fresh nullifier.
+
+    @param _profileId The ID of the profile the email acts on.
+    @param _controller The controller the email authorizes.
+    @param _timestamp The week-rounded DKIM timestamp of the email.
 
     @return _ The email proof.
   */
   function _proof (
-    bytes32 _salt,
-    string memory _command,
-    uint256 _timestamp,
-    bool _code
+    bytes32 _profileId,
+    address _controller,
+    uint256 _timestamp
   ) internal returns (EmailProof memory) {
     return EmailProof({
       domainName: DOMAIN,
       publicKeyHash: KEY_HASH,
       timestamp: _timestamp,
-      maskedCommand: _command,
       emailNullifier: keccak256(abi.encode("email", ++emailsSent)),
-      accountSalt: _salt,
-      isCodeExist: _code,
-      proof: "valid"
+      profileId: _profileId,
+      proof: _proofBytes(_controller, block.chainid, address(registry))
     });
   }
 
   /**
-    Build a first email from an identity: current, carrying the account code.
+    Build a current email for a profile.
 
-    @param _salt The sender's account salt.
-    @param _command The command the email carries.
-
-    @return _ The email proof.
-  */
-  function _firstEmail (
-    bytes32 _salt,
-    string memory _command
-  ) internal returns (EmailProof memory) {
-    return _proof(_salt, _command, block.timestamp, true);
-  }
-
-  /**
-    Build a later email from an identity: current, without the account code.
-
-    @param _salt The sender's account salt.
-    @param _command The command the email carries.
+    @param _profileId The ID of the profile the email acts on.
+    @param _controller The controller the email authorizes.
 
     @return _ The email proof.
   */
   function _email (
-    bytes32 _salt,
-    string memory _command
+    bytes32 _profileId,
+    address _controller
   ) internal returns (EmailProof memory) {
-    return _proof(_salt, _command, block.timestamp, false);
+    return _proof(_profileId, _controller, block.timestamp);
   }
 
   /**
@@ -158,34 +157,6 @@ contract RegistryTest is
       _key, registry.authorizationDigest(_emailNullifier)
     );
     return abi.encodePacked(_r, _s, _v);
-  }
-
-  /**
-    Build the binding tag of the registry under test, independently of the
-    registry's own rendering.
-
-    @return _ The binding tag.
-  */
-  function _binding () internal view returns (string memory) {
-    return string.concat(
-      block.chainid.toString(), ":", address(registry).toHexStringChecksummed()
-    );
-  }
-
-  /**
-    Build the controller command exactly as an EFer's frontend would.
-
-    @param _controller The controller to name.
-
-    @return _ The command.
-  */
-  function _setControllerCommand (
-    address _controller
-  ) internal view returns (string memory) {
-    return string.concat(
-      "Set controller to ", _controller.toHexStringChecksummed(), " ",
-      _binding()
-    );
   }
 
   /**
@@ -211,59 +182,162 @@ contract RegistryTest is
   }
 
   /**
+    Sign a controller's relayed batch of text-record writes at the current
+    nonce.
+
+    @param _key The controller's private key.
+    @param _profileId The ID of the profile.
+    @param _keys The record keys.
+    @param _values The record values.
+
+    @return _ The signature.
+  */
+  function _signTexts (
+    uint256 _key,
+    bytes32 _profileId,
+    string[] memory _keys,
+    string[] memory _values
+  ) internal view returns (bytes memory) {
+    (uint8 _v, bytes32 _r, bytes32 _s) = vm.sign(
+      _key, registry.setTextsDigest(_profileId, _keys, _values)
+    );
+    return abi.encodePacked(_r, _s, _v);
+  }
+
+  /**
+    Build an empty list of strings.
+
+    @return _ The list.
+  */
+  function _list () internal pure returns (string[] memory) {
+    return new string[](0);
+  }
+
+  /**
+    Build a list of one string.
+
+    @param _a The string.
+
+    @return _ The list.
+  */
+  function _list (
+    string memory _a
+  ) internal pure returns (string[] memory) {
+    string[] memory _out = new string[](1);
+    _out[0] = _a;
+    return _out;
+  }
+
+  /**
+    Build a list of two strings.
+
+    @param _a The first string.
+    @param _b The second string.
+
+    @return _ The list.
+  */
+  function _list (
+    string memory _a,
+    string memory _b
+  ) internal pure returns (string[] memory) {
+    string[] memory _out = new string[](2);
+    _out[0] = _a;
+    _out[1] = _b;
+    return _out;
+  }
+
+  /**
+    Build a list of three strings.
+
+    @param _a The first string.
+    @param _b The second string.
+    @param _c The third string.
+
+    @return _ The list.
+  */
+  function _list (
+    string memory _a,
+    string memory _b,
+    string memory _c
+  ) internal pure returns (string[] memory) {
+    string[] memory _out = new string[](3);
+    _out[0] = _a;
+    _out[1] = _b;
+    _out[2] = _c;
+    return _out;
+  }
+
+  /**
+    Compute the registry's EIP-712 domain separator from first principles.
+
+    @return _ The domain separator.
+  */
+  function _domainSeparator () internal view returns (bytes32) {
+    return keccak256(
+      abi.encode(
+        keccak256(
+          abi.encodePacked(
+            "EIP712Domain(string name,string version,uint256 chainId,",
+            "address verifyingContract)"
+          )
+        ), keccak256(bytes("Registry")), keccak256(bytes("1")), block.chainid,
+        address(registry)
+      )
+    );
+  }
+
+  /**
     Register a profile by email, binding a controller.
 
-    @param _salt The sender's account salt.
+    @param _sender The hash of the sender's address.
     @param _controller The controller to bind.
   */
   function _register (
-    bytes32 _salt,
+    bytes32 _sender,
     address _controller
   ) internal {
-    registry.register(
-      _firstEmail(_salt, _setControllerCommand(_controller)), _controller
-    );
+    registry.register(_email(_sender, _controller), _controller);
   }
 
   /**
     Retrieve a profile.
 
-    @param _salt The profile ID.
+    @param _sender The profile ID.
 
     @return _ The profile's controller, active flag, registration time, and last
       honored DKIM timestamp.
   */
   function _profile (
-    bytes32 _salt
+    bytes32 _sender
   ) internal view returns (address, bool, uint256, uint256) {
-    return registry.profiles(_salt);
+    return registry.profiles(_sender);
   }
 
   /**
     Retrieve a profile's controller.
 
-    @param _salt The profile ID.
+    @param _sender The profile ID.
 
     @return _ The profile's controller.
   */
   function _controllerOf (
-    bytes32 _salt
+    bytes32 _sender
   ) internal view returns (address) {
-    (address _c, , , ) = registry.profiles(_salt);
+    (address _c, , , ) = registry.profiles(_sender);
     return _c;
   }
 
   /**
     Retrieve a profile's last honored DKIM timestamp.
 
-    @param _salt The profile ID.
+    @param _sender The profile ID.
 
     @return _ The profile's last honored DKIM timestamp.
   */
   function _lastTimestamp (
-    bytes32 _salt
+    bytes32 _sender
   ) internal view returns (uint256) {
-    (, , , uint256 _t) = registry.profiles(_salt);
+    (, , , uint256 _t) = registry.profiles(_sender);
     return _t;
   }
 
@@ -293,11 +367,10 @@ contract RegistryTest is
 
   /// A registration email creates the profile and binds the controller.
   function test_register () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     vm.expectEmit(address(registry));
     emit Registry.EmailAuthorized(
-      ALICE, _p.emailNullifier, block.timestamp, _p.maskedCommand
+      ALICE, _p.emailNullifier, KEY_HASH, block.timestamp
     );
     vm.expectEmit(address(registry));
     emit Registry.Registered(ALICE);
@@ -318,8 +391,7 @@ contract RegistryTest is
 
   /// Anyone may relay a proof; the email, not the sender, is the authority.
   function test_email_anyoneMaySubmit () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     vm.prank(relayer);
     registry.register(_p, aliceWallet);
     assertEq(_controllerOf(ALICE), aliceWallet);
@@ -332,8 +404,7 @@ contract RegistryTest is
 
   /// Every profile is a two-of-two from birth: no zero controllers.
   function test_register_requiresNonzeroController () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(address(0)));
+    EmailProof memory _p = _email(ALICE, address(0));
     vm.expectRevert(Registry.ZeroAddress.selector);
     registry.register(_p, address(0));
   }
@@ -341,8 +412,7 @@ contract RegistryTest is
   /// An identity registers exactly once.
   function test_register_once () public {
     _register(ALICE, aliceWallet);
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(ALICE, bobWallet);
     vm.expectRevert(
       abi.encodeWithSelector(Registry.AlreadyRegistered.selector, ALICE)
     );
@@ -351,88 +421,34 @@ contract RegistryTest is
   }
 
   /**
-    The registering email must carry the account code; later emails need only
-    the controller's signature.
+    An email authorizes exactly one controller, on exactly this registry, on
+    exactly this chain.
   */
-  function test_register_requiresAccountCode () public {
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(aliceWallet));
-    vm.expectRevert(Registry.MissingAccountCode.selector);
+  function test_register_bindsController () public {
+
+    // The email authorizes bob's wallet; the call claims alice's.
+    EmailProof memory _p = _email(ALICE, bobWallet);
+    vm.expectRevert(Registry.InvalidEmailProof.selector);
     registry.register(_p, aliceWallet);
-    assertEq(registry.profileCount(), 0);
-    _register(ALICE, aliceWallet);
-    EmailProof memory _q = _email(ALICE, _setControllerCommand(bobWallet));
-    registry.setController(_q, bobWallet, _sign(aliceKey, _q.emailNullifier));
-    assertEq(_controllerOf(ALICE), bobWallet);
-  }
 
-  /// A registration email whose signature carries no timestamp records none.
-  function test_register_zeroTimestamp () public {
-    registry.register(
-      _proof(ALICE, _setControllerCommand(aliceWallet), 0, true), aliceWallet
-    );
-    assertEq(_lastTimestamp(ALICE), 0);
-    assertEq(_controllerOf(ALICE), aliceWallet);
-  }
+    // The right controller on another registry.
+    _p = _email(ALICE, aliceWallet);
+    _p.proof = _proofBytes(aliceWallet, block.chainid, bobWallet);
+    vm.expectRevert(Registry.InvalidEmailProof.selector);
+    registry.register(_p, aliceWallet);
 
-  /// The controller address is accepted checksummed, lowercase, or uppercase.
-  function test_register_acceptsAnyAddressCasing () public {
-    _register(ALICE, aliceWallet);
-    string memory _lower =
-      string.concat(
-        "Set controller to ", bobWallet.toHexString(), " ", _binding()
-      );
-    registry.register(_firstEmail(BOB, _lower), bobWallet);
-    assertEq(_controllerOf(BOB), bobWallet);
-    string memory _upper =
-      string.concat(
-        "Set controller to 0x",
-        LibString.upper(bobWallet.toHexStringNoPrefix()), " ", _binding()
-      );
-    registry.register(_firstEmail(CAROL, _upper), bobWallet);
-    assertEq(_controllerOf(CAROL), bobWallet);
-
-    // An uppercase `0X` prefix is not one of the three forms.
-    string memory _bad =
-      string.concat(
-        "Set controller to ", LibString.upper(bobWallet.toHexString()), " ",
-        _binding()
-      );
-    vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _bad)
-    );
-    registry.register(_firstEmail(BOB, _bad), bobWallet);
-  }
-
-  /// The call must claim exactly what the email says.
-  function test_register_revertsOnWrongCommand () public {
-
-    // The email names bob's wallet; the call claims alice's.
-    string memory _cmd = _setControllerCommand(bobWallet);
-    vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _cmd)
-    );
-    registry.register(_firstEmail(ALICE, _cmd), aliceWallet);
-
-    // Not a controller command at all.
-    vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, "hello")
-    );
-    registry.register(_firstEmail(ALICE, "hello"), aliceWallet);
-
-    // Trailing garbage after a perfect command is still a different command.
-    string memory _trailing =
-      string.concat(_setControllerCommand(aliceWallet), " x");
-    vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _trailing)
-    );
-    registry.register(_firstEmail(ALICE, _trailing), aliceWallet);
+    // The right controller and registry on another chain.
+    _p = _email(ALICE, aliceWallet);
+    _p.proof = _proofBytes(aliceWallet, 999, address(registry));
+    vm.expectRevert(Registry.InvalidEmailProof.selector);
+    registry.register(_p, aliceWallet);
     assertEq(registry.profileCount(), 0, "nothing registered");
   }
 
   /// Rotation needs email and the current controller's signature together.
   function test_setController_requiresControllerSignature () public {
     _register(ALICE, aliceWallet);
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(ALICE, bobWallet);
 
     // No signature.
     vm.expectRevert(Registry.InvalidControllerSignature.selector);
@@ -453,7 +469,7 @@ contract RegistryTest is
     assertEq(_controllerOf(ALICE), bobWallet);
 
     // The signing power moved with the rotation.
-    _p = _email(ALICE, _setControllerCommand(aliceWallet));
+    _p = _email(ALICE, aliceWallet);
     bytes memory _staleSig = _sign(aliceKey, _p.emailNullifier);
     vm.expectRevert(Registry.InvalidControllerSignature.selector);
     registry.setController(_p, aliceWallet, _staleSig);
@@ -462,25 +478,22 @@ contract RegistryTest is
     assertEq(registry.profileCount(), 1, "no re-registration");
   }
 
-  /// Rotation matches the command exactly, just as registration does.
-  function test_setController_revertsOnWrongCommand () public {
+  /// Rotation binds the controller exactly, just as registration does.
+  function test_setController_bindsController () public {
     _register(ALICE, aliceWallet);
 
-    // The email names bob's wallet; the call claims alice's.
-    string memory _cmd = _setControllerCommand(bobWallet);
-    EmailProof memory _p = _email(ALICE, _cmd);
+    // The email authorizes bob's wallet; the call claims carol's.
+    EmailProof memory _p = _email(ALICE, bobWallet);
     bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
-    vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _cmd)
-    );
-    registry.setController(_p, aliceWallet, _sig);
+    vm.expectRevert(Registry.InvalidEmailProof.selector);
+    registry.setController(_p, makeAddr("carol"), _sig);
     assertEq(_controllerOf(ALICE), aliceWallet, "controller unmoved");
   }
 
   /// Rotation never unbinds: the two-of-two is permanent.
   function test_setController_rejectsZero () public {
     _register(ALICE, aliceWallet);
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(address(0)));
+    EmailProof memory _p = _email(ALICE, address(0));
     bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
     vm.expectRevert(Registry.ZeroAddress.selector);
     registry.setController(_p, address(0), _sig);
@@ -488,7 +501,7 @@ contract RegistryTest is
 
   /// Rotation acts only on registered profiles; nothing auto-registers.
   function test_setController_requiresRegistration () public {
-    EmailProof memory _p = _firstEmail(BOB, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(BOB, bobWallet);
     vm.expectRevert(
       abi.encodeWithSelector(Registry.UnknownProfile.selector, BOB)
     );
@@ -511,7 +524,19 @@ contract RegistryTest is
       ALICE, "avatar", "a", _signText(aliceKey, ALICE, "avatar", "a")
     );
     assertEq(registry.text(ALICE, "avatar"), "a");
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(bobWallet));
+
+    // So does a batch, under one signature.
+    string[] memory _keys = _list("avatar", "url");
+    string[] memory _values = _list("b", "https://alice.example");
+    bytes memory _strangerBatchSig = _signTexts(bobKey, ALICE, _keys, _values);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _keys, _values, _strangerBatchSig);
+    registry.setTextsSigned(
+      ALICE, _keys, _values, _signTexts(aliceKey, ALICE, _keys, _values)
+    );
+    assertEq(registry.text(ALICE, "avatar"), "b");
+    assertEq(registry.text(ALICE, "url"), "https://alice.example");
+    EmailProof memory _p = _email(ALICE, bobWallet);
     registry.setController(_p, bobWallet, _sign(aliceKey, _p.emailNullifier));
     assertEq(_controllerOf(ALICE), bobWallet);
   }
@@ -547,8 +572,7 @@ contract RegistryTest is
   function test_email_revertsOnWrongDomain () public {
 
     // Even an honored key hash cannot speak for a foreign domain.
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     _p.domainName = "ethereum.com";
     vm.expectRevert(
       abi.encodeWithSelector(Registry.WrongDomain.selector, "ethereum.com")
@@ -558,8 +582,7 @@ contract RegistryTest is
 
   /// Emails signed with a key management does not honor are rejected.
   function test_email_revertsOnUnknownDKIMKey () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     _p.publicKeyHash = keccak256("some other key");
     vm.expectRevert(
       abi.encodeWithSelector(
@@ -571,7 +594,7 @@ contract RegistryTest is
     // A revoked key stops working at once.
     vm.prank(management);
     registry.setDKIMPublicKeyHash(KEY_HASH, false);
-    _p = _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    _p = _email(ALICE, aliceWallet);
     vm.expectRevert(
       abi.encodeWithSelector(
         Registry.InvalidDKIMPublicKeyHash.selector, KEY_HASH
@@ -598,15 +621,14 @@ contract RegistryTest is
     assertFalse(registry.dkimPublicKeyHashes(KEY_HASH));
 
     // Old-key emails fail; new-key emails act.
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     vm.expectRevert(
       abi.encodeWithSelector(
         Registry.InvalidDKIMPublicKeyHash.selector, KEY_HASH
       )
     );
     registry.register(_p, aliceWallet);
-    _p = _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    _p = _email(ALICE, aliceWallet);
     _p.publicKeyHash = _newKey;
     registry.register(_p, aliceWallet);
     assertEq(_controllerOf(ALICE), aliceWallet);
@@ -614,12 +636,11 @@ contract RegistryTest is
 
   /// Every email is single-use, whatever it is resubmitted as.
   function test_email_isSingleUse () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     registry.register(_p, aliceWallet);
 
     // The registration email cannot register anyone else.
-    EmailProof memory _r = _firstEmail(BOB, _setControllerCommand(bobWallet));
+    EmailProof memory _r = _email(BOB, bobWallet);
     _r.emailNullifier = _p.emailNullifier;
     vm.expectRevert(
       abi.encodeWithSelector(
@@ -629,7 +650,7 @@ contract RegistryTest is
     registry.register(_r, bobWallet);
 
     // Nor can it be re-spent as an authorized rotation.
-    EmailProof memory _q = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _q = _email(ALICE, bobWallet);
     _q.emailNullifier = _p.emailNullifier;
     bytes memory _sig = _sign(aliceKey, _q.emailNullifier);
     vm.expectRevert(
@@ -647,8 +668,7 @@ contract RegistryTest is
     assertEq(_lastTimestamp(ALICE), _now);
 
     // An older email can no longer be honored.
-    EmailProof memory _old =
-      _proof(ALICE, _setControllerCommand(bobWallet), _now - 100, false);
+    EmailProof memory _old = _proof(ALICE, bobWallet, _now - 100);
     bytes memory _oldSig = _sign(aliceKey, _old.emailNullifier);
     vm.expectRevert(
       abi.encodeWithSelector(Registry.StaleEmail.selector, _now - 100, _now)
@@ -656,26 +676,24 @@ contract RegistryTest is
     registry.setController(_old, bobWallet, _oldSig);
 
     // The same second is fine.
-    EmailProof memory _same =
-      _proof(ALICE, _setControllerCommand(bobWallet), _now, false);
+    EmailProof memory _same = _proof(ALICE, bobWallet, _now);
     registry.setController(
       _same, bobWallet, _sign(aliceKey, _same.emailNullifier)
     );
     assertEq(_lastTimestamp(ALICE), _now);
 
-    // A signature without a timestamp skips the check and moves nothing.
-    EmailProof memory _zero =
-      _proof(ALICE, _setControllerCommand(aliceWallet), 0, false);
-    registry.setController(
-      _zero, aliceWallet, _sign(bobKey, _zero.emailNullifier)
+    // A zero timestamp is simply the oldest possible email.
+    EmailProof memory _zero = _proof(ALICE, aliceWallet, 0);
+    bytes memory _zeroSig = _sign(bobKey, _zero.emailNullifier);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.StaleEmail.selector, 0, _now)
     );
-    assertEq(_lastTimestamp(ALICE), _now, "zero timestamps leave no trace");
+    registry.setController(_zero, aliceWallet, _zeroSig);
 
     // A later email advances the clock.
-    EmailProof memory _later =
-      _proof(ALICE, _setControllerCommand(bobWallet), _now + 5, false);
+    EmailProof memory _later = _proof(ALICE, bobWallet, _now + 5);
     registry.setController(
-      _later, bobWallet, _sign(aliceKey, _later.emailNullifier)
+      _later, bobWallet, _sign(bobKey, _later.emailNullifier)
     );
     assertEq(_lastTimestamp(ALICE), _now + 5);
     assertEq(_controllerOf(ALICE), bobWallet);
@@ -683,8 +701,7 @@ contract RegistryTest is
 
   /// A proof the verifier rejects does nothing, and spends nothing.
   function test_email_revertsOnInvalidProof () public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     _p.proof = "forged";
     vm.expectRevert(Registry.InvalidEmailProof.selector);
     registry.register(_p, aliceWallet);
@@ -693,7 +710,7 @@ contract RegistryTest is
 
     // A forged rotation is rejected the same way, spending nothing.
     _register(ALICE, aliceWallet);
-    EmailProof memory _q = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _q = _email(ALICE, bobWallet);
     _q.proof = "forged";
     bytes memory _sig = _sign(aliceKey, _q.emailNullifier);
     vm.expectRevert(Registry.InvalidEmailProof.selector);
@@ -706,7 +723,7 @@ contract RegistryTest is
     _register(ALICE, aliceWallet);
     vm.prank(management);
     registry.setActive(ALICE, false);
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(ALICE, bobWallet);
     bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
     vm.expectRevert(
       abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
@@ -721,7 +738,7 @@ contract RegistryTest is
     );
     registry.setTextSigned(ALICE, "avatar", "a", _textSig);
 
-    // Reactivation restores email control, including the rejected command.
+    // Reactivation restores email control, including the rejected email.
     vm.prank(management);
     registry.setActive(ALICE, true);
     registry.setController(_p, bobWallet, _sig);
@@ -828,6 +845,212 @@ contract RegistryTest is
     );
   }
 
+  /**
+    One relayed signature writes a batch in order, a later write to a key
+    overriding an earlier one, and consumes one nonce.
+  */
+  function test_setTextsSigned () public {
+    _register(BOB, bobWallet);
+    string[] memory _keys = _list("avatar", "url");
+    string[] memory _values = _list("a", "https://bob.example");
+    vm.expectEmit(address(registry));
+    emit Registry.TextChanged(BOB, "avatar", "avatar", "a");
+    vm.expectEmit(address(registry));
+    emit Registry.TextChanged(BOB, "url", "url", "https://bob.example");
+    registry.setTextsSigned(
+      BOB, _keys, _values, _signTexts(bobKey, BOB, _keys, _values)
+    );
+    assertEq(registry.text(BOB, "avatar"), "a");
+    assertEq(registry.text(BOB, "url"), "https://bob.example");
+    assertEq(registry.nonces(BOB), 1);
+
+    // Clearing and overriding in one batch, at the next nonce.
+    _keys = _list("url", "avatar", "url");
+    _values = _list("x", "", "y");
+    registry.setTextsSigned(
+      BOB, _keys, _values, _signTexts(bobKey, BOB, _keys, _values)
+    );
+    assertEq(registry.text(BOB, "url"), "y", "the later write wins");
+    assertEq(registry.text(BOB, "avatar"), "", "an empty value clears");
+    assertEq(registry.nonces(BOB), 2);
+  }
+
+  /**
+    A batch signature is single-use and bound to its signer, profile, keys,
+    values, and their order; a single-record signature never passes for one.
+  */
+  function test_setTextsSigned_replayAndBinding () public {
+    _register(ALICE, aliceWallet);
+    _register(BOB, bobWallet);
+    string[] memory _keys = _list("avatar", "url");
+    string[] memory _values = _list("a", "b");
+    bytes memory _sig = _signTexts(aliceKey, ALICE, _keys, _values);
+    registry.setTextsSigned(ALICE, _keys, _values, _sig);
+
+    // The consumed nonce retires the signature.
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _keys, _values, _sig);
+
+    /*
+      A stranger's signature is refused, and a controller's signature for one
+      profile says nothing about another.
+    */
+    bytes memory _strangerSig = _signTexts(bobKey, ALICE, _keys, _values);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _keys, _values, _strangerSig);
+    bytes memory _crossSig = _signTexts(bobKey, ALICE, _keys, _values);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(BOB, _keys, _values, _crossSig);
+
+    // A signature covers exactly its values, its keys, and their order.
+    bytes memory _fresh = _signTexts(aliceKey, ALICE, _keys, _values);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _keys, _list("a", "c"), _fresh);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(
+      ALICE, _list("url", "avatar"), _list("b", "a"), _fresh
+    );
+
+    // A single-record signature does not stand in for a batch of one.
+    bytes memory _single = _signText(aliceKey, ALICE, "avatar", "a");
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _list("avatar"), _list("a"), _single);
+    registry.setTextsSigned(ALICE, _keys, _values, _fresh);
+    assertEq(registry.nonces(ALICE), 2);
+  }
+
+  /// Batches act only on registered profiles, paired lists, and usable keys.
+  function test_setTextsSigned_validation () public {
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.UnknownProfile.selector, BOB)
+    );
+    registry.setTextsSigned(BOB, _list("avatar"), _list("a"), "");
+    _register(ALICE, aliceWallet);
+    vm.expectRevert(Registry.LengthMismatch.selector);
+    registry.setTextsSigned(ALICE, _list("avatar", "url"), _list("a"), "");
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.InvalidKey.selector, "my avatar")
+    );
+    registry.setTextsSigned(
+      ALICE, _list("url", "my avatar"), _list("a", "b"), ""
+    );
+    vm.expectRevert(abi.encodeWithSelector(Registry.InvalidKey.selector, ""));
+    registry.setTextsSigned(ALICE, _list(""), _list("a"), "");
+  }
+
+  /**
+    An empty signed batch writes nothing and consumes the nonce, revoking every
+    signed write handed out before it.
+  */
+  function test_setTextsSigned_emptyBatchRevokes () public {
+    _register(ALICE, aliceWallet);
+    bytes memory _pending = _signText(aliceKey, ALICE, "url", "x");
+    bytes memory _pendingBatch =
+      _signTexts(aliceKey, ALICE, _list("url"), _list("y"));
+    registry.setTextsSigned(
+      ALICE, _list(), _list(), _signTexts(aliceKey, ALICE, _list(), _list())
+    );
+    assertEq(registry.nonces(ALICE), 1);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextSigned(ALICE, "url", "x", _pending);
+    vm.expectRevert(Registry.InvalidControllerSignature.selector);
+    registry.setTextsSigned(ALICE, _list("url"), _list("y"), _pendingBatch);
+    assertEq(registry.text(ALICE, "url"), "");
+  }
+
+  /**
+    The relayed-batch digest is exactly the documented EIP-712 digest, each list
+    encoded as the hash of its elements' hashes.
+  */
+  function test_setTextsDigest () public {
+    _register(ALICE, aliceWallet);
+    assertEq(
+      registry.SET_TEXTS_TYPEHASH(),
+      keccak256(
+        "SetTexts(bytes32 profileId,string[] keys,string[] values,uint256 nonce)"
+      )
+    );
+    bytes32 _structHash =
+      keccak256(
+        abi.encode(
+          registry.SET_TEXTS_TYPEHASH(), ALICE,
+          keccak256(abi.encodePacked(keccak256("avatar"), keccak256("url"))),
+          keccak256(abi.encodePacked(keccak256("a"), keccak256(""))),
+          registry.nonces(ALICE)
+        )
+      );
+    assertEq(
+      registry.setTextsDigest(ALICE, _list("avatar", "url"), _list("a", "")),
+      keccak256(abi.encodePacked(hex"1901", _domainSeparator(), _structHash))
+    );
+
+    // An empty list encodes as the hash of nothing.
+    bytes32 _emptyHash =
+      keccak256(
+        abi.encode(
+          registry.SET_TEXTS_TYPEHASH(), ALICE, keccak256(""), keccak256(""),
+          registry.nonces(ALICE)
+        )
+      );
+    assertEq(
+      registry.setTextsDigest(ALICE, _list(), _list()),
+      keccak256(abi.encodePacked(hex"1901", _domainSeparator(), _emptyHash))
+    );
+  }
+
+  /**
+    Only the controller writes batches by transaction, in order, consuming no
+    nonce; a refused batch writes nothing.
+  */
+  function test_setTexts_controllerOnly () public {
+    _register(ALICE, aliceWallet);
+    vm.prank(aliceWallet);
+    vm.expectEmit(address(registry));
+    emit Registry.TextChanged(ALICE, "url", "url", "https://alice.example");
+    vm.expectEmit(address(registry));
+    emit Registry.TextChanged(ALICE, "com.github", "com.github", "alice");
+    registry.setTexts(
+      ALICE, _list("url", "com.github"), _list(
+        "https://alice.example", "alice"
+      )
+    );
+    assertEq(registry.text(ALICE, "url"), "https://alice.example");
+    assertEq(registry.text(ALICE, "com.github"), "alice");
+    assertEq(registry.nonces(ALICE), 0, "direct writes consume no nonce");
+
+    // Strangers and management have no editing power.
+    vm.prank(bobWallet);
+    vm.expectRevert(Registry.NotController.selector);
+    registry.setTexts(ALICE, _list("url"), _list("x"));
+    vm.prank(management);
+    vm.expectRevert(Registry.NotController.selector);
+    registry.setTexts(ALICE, _list("url"), _list("x"));
+
+    // Unknown profiles, uneven lists, and bad keys are rejected whole.
+    vm.prank(aliceWallet);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.UnknownProfile.selector, BOB)
+    );
+    registry.setTexts(BOB, _list("url"), _list("x"));
+    vm.prank(aliceWallet);
+    vm.expectRevert(Registry.LengthMismatch.selector);
+    registry.setTexts(ALICE, _list("url"), _list("x", "y"));
+    vm.prank(aliceWallet);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.InvalidKey.selector, "com github")
+    );
+    registry.setTexts(ALICE, _list("url", "com github"), _list("x", "y"));
+    assertEq(registry.text(ALICE, "url"), "https://alice.example");
+
+    // Clearing and overriding, in order.
+    vm.prank(aliceWallet);
+    registry.setTexts(
+      ALICE, _list("com.github", "url", "url"), _list("", "x", "y")
+    );
+    assertEq(registry.text(ALICE, "com.github"), "");
+    assertEq(registry.text(ALICE, "url"), "y");
+  }
+
   /// Only the controller edits records by transaction; empty values clear.
   function test_setText_controllerOnly () public {
     _register(ALICE, aliceWallet);
@@ -875,6 +1098,17 @@ contract RegistryTest is
       abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
     );
     registry.setText(ALICE, "url", "https://elsewhere.example");
+    vm.prank(aliceWallet);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
+    );
+    registry.setTexts(ALICE, _list("url"), _list("https://elsewhere.example"));
+    bytes memory _batchSig =
+      _signTexts(aliceKey, ALICE, _list("url"), _list("x"));
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
+    );
+    registry.setTextsSigned(ALICE, _list("url"), _list("x"), _batchSig);
 
     // The records stay exactly where they were.
     assertEq(registry.text(ALICE, "url"), "https://alice.example");
@@ -887,11 +1121,25 @@ contract RegistryTest is
   }
 
   /// Only management flags profiles, and only profiles that exist.
-  function test_setActive_onlyManagement () public {
+  function test_setActive_managementControlsStandingProfiles () public {
     _register(ALICE, aliceWallet);
+
+    // Before the lapse, nobody but management moves the flag, either way.
     vm.prank(aliceWallet);
     vm.expectRevert(Registry.NotManagement.selector);
     registry.setActive(ALICE, false);
+    vm.prank(relayer);
+    vm.expectRevert(Registry.NotManagement.selector);
+    registry.setActive(ALICE, true);
+    vm.warp(block.timestamp + 90 days - 1);
+    vm.prank(relayer);
+    vm.expectRevert(Registry.NotManagement.selector);
+    registry.setActive(ALICE, false);
+    vm.prank(relayer);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.UnknownProfile.selector, BOB)
+    );
+    registry.setActive(BOB, false);
     vm.prank(management);
     vm.expectRevert(
       abi.encodeWithSelector(Registry.UnknownProfile.selector, BOB)
@@ -947,47 +1195,182 @@ contract RegistryTest is
     registry.acceptManagement();
   }
 
-  /// The command helpers render exactly what an email must say.
-  function test_commandHelpers () public view {
-    assertEq(
-      registry.commandBinding(),
-      string.concat("31337:", address(registry).toHexStringChecksummed())
+  /**
+    A profile lapses `RENEWAL_PERIOD` after its latest email, goes read-only,
+    and comes back with a fresh email.
+  */
+  function test_profile_lapsesAndRenews () public {
+    uint256 _t = block.timestamp;
+    _register(ALICE, aliceWallet);
+    assertTrue(registry.isActive(ALICE));
+    assertEq(registry.expiresAt(ALICE), _t + 90 days);
+    assertEq(registry.expiresAt(BOB), 0, "unregistered");
+    assertFalse(registry.isActive(BOB));
+
+    // One second before the lapse, records still move.
+    vm.warp(_t + 90 days - 1);
+    vm.prank(aliceWallet);
+    registry.setText(ALICE, "url", "https://alice.example");
+
+    // At the lapse, both record paths freeze.
+    vm.warp(_t + 90 days);
+    assertFalse(registry.isActive(ALICE));
+    vm.prank(aliceWallet);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.LapsedProfile.selector, ALICE)
     );
-    assertEq(
-      registry.setControllerCommand(aliceWallet),
-      _setControllerCommand(aliceWallet)
+    registry.setText(ALICE, "url", "https://elsewhere.example");
+    bytes memory _textSig = _signText(aliceKey, ALICE, "url", "x");
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.LapsedProfile.selector, ALICE)
     );
+    registry.setTextSigned(ALICE, "url", "x", _textSig);
+    vm.prank(aliceWallet);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.LapsedProfile.selector, ALICE)
+    );
+    registry.setTexts(ALICE, _list("url"), _list("x"));
+    bytes memory _batchSig =
+      _signTexts(aliceKey, ALICE, _list("url"), _list("x"));
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.LapsedProfile.selector, ALICE)
+    );
+    registry.setTextsSigned(ALICE, _list("url"), _list("x"), _batchSig);
+    assertEq(registry.text(ALICE, "url"), "https://alice.example", "kept");
+
+    // A fresh email authorizing the same controller renews it.
+    EmailProof memory _p = _email(ALICE, aliceWallet);
+    registry.setController(_p, aliceWallet, _sign(aliceKey, _p.emailNullifier));
+    assertTrue(registry.isActive(ALICE));
+    assertEq(registry.expiresAt(ALICE), block.timestamp + 90 days);
+    assertEq(_controllerOf(ALICE), aliceWallet);
+    vm.prank(aliceWallet);
+    registry.setText(ALICE, "url", "https://elsewhere.example");
   }
 
-  /// A command bound to any other deployment is rejected.
-  function test_commandBinding_rejectsForeignBindings () public {
-    string memory _action =
-      string.concat("Set controller to ", aliceWallet.toHexStringChecksummed());
-
-    // No binding at all.
+  /// An email is usable for `EMAIL_LIFETIME` after its timestamp, and no more.
+  function test_email_expiresAfterLifetime () public {
+    uint256 _t = block.timestamp;
+    EmailProof memory _p = _proof(ALICE, aliceWallet, _t - 5 weeks - 1);
     vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _action)
+      abi.encodeWithSelector(Registry.ExpiredEmail.selector, _t - 5 weeks - 1)
     );
-    registry.register(_firstEmail(ALICE, _action), aliceWallet);
+    registry.register(_p, aliceWallet);
+    _p = _proof(ALICE, aliceWallet, _t - 5 weeks);
+    registry.register(_p, aliceWallet);
+    assertEq(registry.expiresAt(ALICE), _t - 5 weeks + 90 days);
 
-    // The right registry on the wrong chain.
-    string memory _wrongChain =
-      string.concat(
-        _action, " 999:", address(registry).toHexStringChecksummed()
-      );
+    // An old email cannot renew either.
+    EmailProof memory _q = _proof(ALICE, aliceWallet, _t - 5 weeks);
+    vm.warp(_t + 1);
+    bytes memory _sig = _sign(aliceKey, _q.emailNullifier);
     vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _wrongChain)
+      abi.encodeWithSelector(Registry.ExpiredEmail.selector, _t - 5 weeks)
     );
-    registry.register(_firstEmail(ALICE, _wrongChain), aliceWallet);
+    registry.setController(_q, aliceWallet, _sig);
+  }
 
-    // The right chain on the wrong registry.
-    string memory _wrongRegistry =
-      string.concat(_action, " 31337:", bobWallet.toHexStringChecksummed());
+  /**
+    Once a profile lapses, anyone may flag it inactive, and nobody but
+    management may restore it. Flagged, it can no longer renew; restored, it
+    renews again with a fresh email.
+  */
+  function test_setActive_anyoneMayRetireALapsedProfile () public {
+    uint256 _t = block.timestamp;
+    _register(ALICE, aliceWallet);
+    vm.warp(_t + 90 days);
+    assertFalse(registry.isActive(ALICE), "lapsed");
+
+    // Anyone may retire it; nobody but management may bring it back.
+    vm.prank(relayer);
+    vm.expectEmit(address(registry));
+    emit Registry.ActiveSet(ALICE, false);
+    registry.setActive(ALICE, false);
+    (, bool _active, , ) = _profile(ALICE);
+    assertFalse(_active);
+    vm.prank(relayer);
+    registry.setActive(ALICE, false);
+    vm.prank(aliceWallet);
+    vm.expectRevert(Registry.NotManagement.selector);
+    registry.setActive(ALICE, true);
+
+    // Retired, it cannot renew, even with a fresh email and its controller.
+    EmailProof memory _p = _email(ALICE, aliceWallet);
+    bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
     vm.expectRevert(
-      abi.encodeWithSelector(Registry.InvalidCommand.selector, _wrongRegistry)
+      abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
     );
-    registry.register(_firstEmail(ALICE, _wrongRegistry), aliceWallet);
-    assertEq(registry.profileCount(), 0, "nothing registered");
+    registry.setController(_p, aliceWallet, _sig);
+
+    // Restored by management, it renews.
+    vm.prank(management);
+    registry.setActive(ALICE, true);
+    assertFalse(registry.isActive(ALICE), "still lapsed until renewed");
+    registry.setController(_p, aliceWallet, _sig);
+    assertTrue(registry.isActive(ALICE));
+    assertEq(registry.expiresAt(ALICE), block.timestamp + 90 days);
+
+    // Renewed, it stands again, and is management's alone to flag.
+    vm.prank(relayer);
+    vm.expectRevert(Registry.NotManagement.selector);
+    registry.setActive(ALICE, false);
+  }
+
+  /**
+    A profile flagged inactive cannot renew, even once lapsed, and restoring it
+    does not extend its expiry.
+  */
+  function test_inactiveProfile_cannotRenew () public {
+    uint256 _t = block.timestamp;
+    _register(ALICE, aliceWallet);
+    vm.prank(management);
+    registry.setActive(ALICE, false);
+    assertFalse(registry.isActive(ALICE));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
+    bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
+    vm.expectRevert(
+      abi.encodeWithSelector(Registry.InactiveProfile.selector, ALICE)
+    );
+    registry.setController(_p, aliceWallet, _sig);
+
+    // Restored after its lapse, it stays lapsed until a fresh email.
+    vm.warp(_t + 90 days);
+    vm.prank(management);
+    registry.setActive(ALICE, true);
+    assertFalse(registry.isActive(ALICE));
+    assertEq(registry.expiresAt(ALICE), _t + 90 days);
+  }
+
+  /**
+    Whatever the time, a stranger may flag a profile inactive exactly when it
+    has lapsed, and may never flag it active.
+
+    @param _elapsed The fuzzed time since registration.
+    @param _stranger The fuzzed caller.
+  */
+  function testFuzz_setActive_strangerOnlyRetiresLapsed (
+    uint256 _elapsed,
+    address _stranger
+  ) public {
+    vm.assume(_stranger != management);
+    _elapsed = bound(_elapsed, 0, 365 days);
+    uint256 _t = block.timestamp;
+    _register(ALICE, aliceWallet);
+    vm.warp(_t + _elapsed);
+    vm.prank(_stranger);
+    vm.expectRevert(Registry.NotManagement.selector);
+    registry.setActive(ALICE, true);
+    if (_elapsed < 90 days) {
+      vm.prank(_stranger);
+      vm.expectRevert(Registry.NotManagement.selector);
+      registry.setActive(ALICE, false);
+      assertTrue(registry.isActive(ALICE));
+      return;
+    }
+    vm.prank(_stranger);
+    registry.setActive(ALICE, false);
+    (, bool _active, , ) = _profile(ALICE);
+    assertFalse(_active);
   }
 
   /// Profiles enumerate in registration order, once each.
@@ -995,7 +1378,7 @@ contract RegistryTest is
     _register(ALICE, aliceWallet);
     _register(BOB, bobWallet);
     _register(CAROL, bobWallet);
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(ALICE, bobWallet);
     registry.setController(_p, bobWallet, _sign(aliceKey, _p.emailNullifier));
     assertEq(registry.profileCount(), 3);
     assertEq(registry.profileIds(0), ALICE);
@@ -1004,8 +1387,8 @@ contract RegistryTest is
   }
 
   /**
-    Any nonzero address at all can be bound as a controller through the
-    checksummed command, and can then edit records directly.
+    Any nonzero address at all can be bound as a controller, and can then edit
+    records directly.
 
     @param _wallet The fuzzed controller.
   */
@@ -1024,27 +1407,27 @@ contract RegistryTest is
     Whatever the identity, key, and value, a relayed signed record write reads
     back exactly, and clears by the controller exactly.
 
-    @param _salt The fuzzed identity.
+    @param _sender The fuzzed identity.
     @param _keySeed The fuzzed seed of the record key.
     @param _value The fuzzed record value.
   */
   function testFuzz_textRoundTrip (
-    bytes32 _salt,
+    bytes32 _sender,
     bytes32 _keySeed,
     string memory _value
   ) public {
-    _register(_salt, aliceWallet);
+    _register(_sender, aliceWallet);
 
     // A hex key never contains a space.
     string memory _key = uint256(_keySeed).toHexString();
     registry.setTextSigned(
-      _salt, _key, _value, _signText(aliceKey, _salt, _key, _value)
+      _sender, _key, _value, _signText(aliceKey, _sender, _key, _value)
     );
-    assertEq(registry.text(_salt, _key), _value);
-    assertEq(registry.nonces(_salt), 1);
+    assertEq(registry.text(_sender, _key), _value);
+    assertEq(registry.nonces(_sender), 1);
     vm.prank(aliceWallet);
-    registry.setText(_salt, _key, "");
-    assertEq(registry.text(_salt, _key), "");
+    registry.setText(_sender, _key, "");
+    assertEq(registry.text(_sender, _key), "");
     assertEq(registry.profileCount(), 1);
   }
 
@@ -1056,12 +1439,11 @@ contract RegistryTest is
   function testFuzz_nullifierIsSingleUse (
     bytes32 _nullifier
   ) public {
-    EmailProof memory _p =
-      _firstEmail(ALICE, _setControllerCommand(aliceWallet));
+    EmailProof memory _p = _email(ALICE, aliceWallet);
     _p.emailNullifier = _nullifier;
     registry.register(_p, aliceWallet);
     assertTrue(registry.usedNullifiers(_nullifier));
-    EmailProof memory _q = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _q = _email(ALICE, bobWallet);
     _q.emailNullifier = _nullifier;
     bytes memory _sig = _sign(aliceKey, _nullifier);
     vm.expectRevert(
@@ -1080,7 +1462,7 @@ contract RegistryTest is
     bytes32 _other
   ) public {
     _register(ALICE, aliceWallet);
-    EmailProof memory _p = _email(ALICE, _setControllerCommand(bobWallet));
+    EmailProof memory _p = _email(ALICE, bobWallet);
     vm.assume(_other != _p.emailNullifier);
     bytes memory _sig = _sign(aliceKey, _other);
     vm.expectRevert(Registry.InvalidControllerSignature.selector);
@@ -1088,24 +1470,22 @@ contract RegistryTest is
   }
 
   /**
-    Whatever two DKIM timestamps an identity's emails carry, the second is
-    honored exactly when it does not precede the first (or carries none).
+    Whatever two usable DKIM timestamps an identity's emails carry, the second
+    is honored exactly when it does not precede the first.
 
     @param _t1 The fuzzed timestamp of the first email.
     @param _t2 The fuzzed timestamp of the second email.
   */
   function testFuzz_timestampsNeverRunBackwards (
-    uint64 _t1,
-    uint64 _t2
+    uint256 _t1,
+    uint256 _t2
   ) public {
-    vm.assume(_t1 != 0);
-    registry.register(
-      _proof(ALICE, _setControllerCommand(aliceWallet), _t1, true), aliceWallet
-    );
-    EmailProof memory _p =
-      _proof(ALICE, _setControllerCommand(bobWallet), _t2, false);
+    _t1 = bound(_t1, block.timestamp - 5 weeks, block.timestamp);
+    _t2 = bound(_t2, block.timestamp - 5 weeks, block.timestamp);
+    registry.register(_proof(ALICE, aliceWallet, _t1), aliceWallet);
+    EmailProof memory _p = _proof(ALICE, bobWallet, _t2);
     bytes memory _sig = _sign(aliceKey, _p.emailNullifier);
-    if (_t2 != 0 && _t2 < _t1) {
+    if (_t2 < _t1) {
       vm.expectRevert(
         abi.encodeWithSelector(Registry.StaleEmail.selector, _t2, _t1)
       );
@@ -1114,7 +1494,7 @@ contract RegistryTest is
       return;
     }
     registry.setController(_p, bobWallet, _sig);
-    assertEq(_lastTimestamp(ALICE), _t2 == 0 ? _t1 : _t2);
+    assertEq(_lastTimestamp(ALICE), _t2);
   }
 }
 

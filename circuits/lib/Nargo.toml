@@ -1,0 +1,10 @@
+[package]
+name = "registry_email"
+type = "lib"
+authors = ["Tim Clancy"]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+noir_rsa = { tag = "v0.12.0", git = "https://github.com/zkpassport/noir_rsa" }
+bignum = { tag = "v0.10.0-2", git = "https://github.com/zkpassport/noir-bignum" }
+sha256 = { tag = "v0.3.0", git = "https://github.com/noir-lang/sha256" }

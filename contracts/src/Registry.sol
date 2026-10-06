@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only 
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
+pragma solidity 0.8.36;
+
 import { EmailProof, IVerifier } from "./interfaces/IVerifier.sol";
 import { EIP712 } from "solady/utils/EIP712.sol";
-import { LibString } from "solady/utils/LibString.sol";
 import { SignatureCheckerLib } from "solady/utils/SignatureCheckerLib.sol";
 
 /**
@@ -10,37 +11,44 @@ import { SignatureCheckerLib } from "solady/utils/SignatureCheckerLib.sol";
   @author Tim Clancy <tim-clancy.gwei>
   @custom:terry "You're not supposed to do accounting in a temple."
 
-  An onchain directory of Ethereum Foundation personnel. Each profile is a
-  key-value store of text records mapping cleanly onto onto `.gwei` and other
-  less-immutable naming systems. Profiles are identified by a ZK Email account
-  salt. A profile comes into being only through a ZK Email proof that a
-  DKIM-signed message from an address at the pinned domain carried the body:
+  An onchain directory of Ethereum Foundation personnel in which every profile
+  is private. Each profile is a key-value store of text records mapping cleanly
+  onto `.gwei` and other less-immutable naming systems. A profile's ID is
+  `sha256(salt || lowercased email address)`, where the salt is a secret only
+  the profile's owner holds, so nobody else can tell whose profile is whose.
 
-  `Set controller to {address} {binding}`
+  A profile comes into being only through a zero-knowledge proof that a
+  DKIM-signed email from an address at the pinned domain carried, as its whole
+  subject, a commitment authorizing a controller on this registry on this
+  chain (see `circuits/`). The proof reveals neither the address nor the
+  subject, and it reveals the email's time only to the week.
 
-  The sole administrative role is `management`: it flags a profile inactive
-  ("former EF") and back and it maintains the set of DKIM public key hashes
-  honored for the domain.
+  A profile stays active for `RENEWAL_PERIOD` after its latest email, and its
+  owner renews it with a fresh email that authorizes the same controller
+  again. Someone who leaves the Foundation loses the mailbox, cannot renew, and
+  lapses on their own. The sole administrative role is `management`: it
+  maintains the set of DKIM public key hashes honored for the domain, and it
+  may flag any profile inactive ("former EF"). Once a profile lapses, anyone
+  may flag it inactive too.
 
-  @custom:date August 25th, 2026.
+  @custom:date October 1st, 2026.
 */
 contract Registry is
   EIP712 {
-  using LibString for address;
-  using LibString for string;
-  using LibString for uint256;
 
   /**
     A profile in the directory.
 
     @param controller The account that edits the profile's records with ordinary
       transactions and co-signs its email operations; never zero.
-    @param active Whether the profile is current EF personnel. Inactive profiles
-      are read-only.
+    @param active Whether the profile is standing. A profile flagged inactive
+      (by management at any time, or by anyone once it lapses) is read-only and
+      cannot renew.
     @param registeredAt The block timestamp of the profile's creation; zero
       means no profile.
-    @param lastTimestamp The DKIM timestamp of the last email honored for the
-      profile; later emails may not precede it.
+    @param lastTimestamp The week-rounded DKIM timestamp of the latest email
+      honored for the profile. The profile lapses `RENEWAL_PERIOD` after it, and
+      later emails may not precede it.
   */
   struct Profile {
     address controller;
@@ -83,11 +91,21 @@ contract Registry is
   );
 
   /**
-    A profile is inactive and therefore read-only.
+    A profile has been flagged inactive and is therefore read-only.
 
     @param profileId The inactive profile ID.
   */
   error InactiveProfile (
+    bytes32 profileId
+  );
+
+  /**
+    A profile has gone `RENEWAL_PERIOD` without a fresh email and is read-only
+    until renewed.
+
+    @param profileId The lapsed profile ID.
+  */
+  error LapsedProfile (
     bytes32 profileId
   );
 
@@ -118,14 +136,12 @@ contract Registry is
     bytes32 emailNullifier
   );
 
-  /// The email registering a profile did not carry its account code.
-  error MissingAccountCode ();
-
   /**
     An email predates the last email honored for its profile.
 
-    @param timestamp The DKIM timestamp of the email.
-    @param lastTimestamp The DKIM timestamp of the last honored email.
+    @param timestamp The week-rounded DKIM timestamp of the email.
+    @param lastTimestamp The week-rounded DKIM timestamp of the last honored
+      email.
   */
   error StaleEmail (
     uint256 timestamp,
@@ -133,12 +149,12 @@ contract Registry is
   );
 
   /**
-    An email's command does not say what the call claims it says.
+    An email is older than `EMAIL_LIFETIME` allows.
 
-    @param maskedCommand The command the email actually carried.
+    @param timestamp The week-rounded DKIM timestamp of the email.
   */
-  error InvalidCommand (
-    string maskedCommand
+  error ExpiredEmail (
+    uint256 timestamp
   );
 
   /// The email proof did not verify.
@@ -156,6 +172,9 @@ contract Registry is
     string key
   );
 
+  /// A batch of records pairs its keys and values unevenly.
+  error LengthMismatch ();
+
   /**
     Emitted when a profile is registered.
 
@@ -166,18 +185,20 @@ contract Registry is
   );
 
   /**
-    Emitted when an email is verified and consumed.
+    Emitted when an email is verified and consumed. The key hash lets anyone
+    audit which DKIM key authorized each profile against the keys the domain
+    publishes in DNS.
 
     @param profileId The ID of the profile the email acted on.
     @param emailNullifier The nullifier of the consumed email.
-    @param timestamp The DKIM timestamp of the email.
-    @param command The command the email carried.
+    @param publicKeyHash The hash of the DKIM key that signed the email.
+    @param timestamp The week-rounded DKIM timestamp of the email.
   */
   event EmailAuthorized (
     bytes32 indexed profileId,
     bytes32 indexed emailNullifier,
-    uint256 timestamp,
-    string command
+    bytes32 indexed publicKeyHash,
+    uint256 timestamp
   );
 
   /**
@@ -207,7 +228,7 @@ contract Registry is
   );
 
   /**
-    Emitted when management flags a profile active or inactive.
+    Emitted when a profile is flagged inactive, or restored.
 
     @param profileId The ID of the profile.
     @param active The new active flag.
@@ -252,8 +273,20 @@ contract Registry is
     address indexed newManagement
   );
 
-  /// The command prefix that sets a profile's controller.
-  string internal constant SET_CONTROLLER_PREFIX = "Set controller to ";
+  /**
+    How long a profile stays active after the DKIM timestamp of its latest
+    email. Timestamps are rounded down to the week, so the effective window is
+    83 to 90 days after the email is sent.
+  */
+  uint256 public constant RENEWAL_PERIOD = 90 days;
+
+  /**
+    How long after its week-rounded DKIM timestamp an email remains usable:
+    every email is usable for at least four weeks after it is sent, and at most
+    five. The slack lets its sender wait before submitting, so the submission's
+    time says little about the email's.
+  */
+  uint256 public constant EMAIL_LIFETIME = 5 weeks;
 
   /// The EIP-712 typehash of a controller's authorization of one email.
   bytes32 public constant EMAIL_AUTHORIZATION_TYPEHASH =
@@ -265,13 +298,20 @@ contract Registry is
       "SetText(bytes32 profileId,string key,string value,uint256 nonce)"
     );
 
-  /// The ZK Email proof verifier.
+  /// The EIP-712 typehash of a controller's relayed batch of text-record
+  /// writes.
+  bytes32 public constant SET_TEXTS_TYPEHASH =
+    keccak256(
+      "SetTexts(bytes32 profileId,string[] keys,string[] values,uint256 nonce)"
+    );
+
+  /// The email proof verifier.
   IVerifier public immutable verifier;
 
   /// The email domain whose senders may hold profiles, e.g. `ethereum.org`.
   string public domain;
 
-  /// The multisig that flags profiles active or inactive.
+  /// The multisig that maintains DKIM keys and may flag profiles inactive.
   address public management;
 
   /// The next management in a pending two-step handover.
@@ -283,7 +323,8 @@ contract Registry is
   /**
     A mapping of registered profiles.
 
-    @custom:param _profileId The ID of the profile: its account salt.
+    @custom:param _profileId The ID of the profile: the SHA-256 of its owner's
+      secret salt followed by their lowercased email address.
     @custom:return _profile The profile.
   */
   mapping (
@@ -308,7 +349,8 @@ contract Registry is
     maintained by management as the domain's mail infrastructure rotates its
     keys.
 
-    @custom:param _publicKeyHash The Poseidon hash of a DKIM public key.
+    @custom:param _publicKeyHash The Pedersen hash of a DKIM public key's
+      modulus limbs (see `circuits/dkim_key_hash`).
     @custom:return _valid Whether the key hash is currently honored.
   */
   mapping (
@@ -327,7 +369,8 @@ contract Registry is
 
   /**
     A mapping of profile nonces consumed by relayed signed operations
-    (`setTextSigned`), so each such signature is single-use and ordered.
+    (`setTextSigned` and `setTextsSigned`), so each such signature is single-use
+    and ordered.
 
     @custom:param _profileId The ID of the profile.
     @custom:return _nonce The next nonce a signed operation must carry.
@@ -337,9 +380,9 @@ contract Registry is
   ) public nonces;
 
   /**
-    Construct the registry against a ZK Email proof verifier.
+    Construct the registry against an email proof verifier.
 
-    @param _verifier The ZK Email proof verifier.
+    @param _verifier The email proof verifier.
     @param _domain The email domain whose senders may hold profiles.
     @param _management The initial management, which must then honor the
       domain's current DKIM public key hashes before any email can act.
@@ -396,68 +439,18 @@ contract Registry is
   }
 
   /**
-    Check whether an email's masked command is exactly an expected command.
-
-    @param _maskedCommand The command the email carried.
-    @param _expected The command the call claims it carried.
-
-    @return _ Whether the two are identical.
-  */
-  function _commandIs (
-    string calldata _maskedCommand,
-    string memory _expected
-  ) internal pure returns (bool) {
-    return keccak256(bytes(_maskedCommand)) == keccak256(bytes(_expected));
-  }
-
-  /**
-    Check whether an email's masked command sets the controller to a particular
-    address, accepting the address in checksummed, lowercase, or uppercase hex:
-    the same three forms ZK Email's own `CommandUtils` accepts. The binding tag
-    must follow in every form.
-
-    @param _maskedCommand The command the email carried.
-    @param _controller The controller the call claims it names.
-
-    @return _ Whether the command sets the controller to `_controller`.
-  */
-  function _isSetControllerCommand (
-    string calldata _maskedCommand,
-    address _controller
-  ) internal view returns (bool) {
-    if (_commandIs(_maskedCommand, setControllerCommand(_controller))) {
-      return true;
-    }
-    string memory _binding = commandBinding();
-    if (
-      _commandIs(
-        _maskedCommand,
-        string.concat(
-          SET_CONTROLLER_PREFIX, _controller.toHexString(), " ", _binding
-        )
-      )
-    ) {
-      return true;
-    }
-    return _commandIs(
-      _maskedCommand,
-      string.concat(
-        SET_CONTROLLER_PREFIX, "0x", _controller.toHexStringNoPrefix().upper(),
-        " ", _binding
-      )
-    );
-  }
-
-  /**
     Verify an email proof against this registry's email policy and consume it:
     the sender's domain must be the pinned domain, the DKIM key hash must be one
-    management honors, the email must be unused, and the proof must verify. The
+    management honors, the email must be unused and within `EMAIL_LIFETIME`, and
+    the proof must verify for `_controller` on this registry on this chain. The
     nullifier is spent and the email announced.
 
-    @param _proof The ZK Email proof to verify and consume.
+    @param _proof The email proof to verify and consume.
+    @param _controller The controller the email's subject must authorize.
   */
   function _verifyEmail (
-    EmailProof calldata _proof
+    EmailProof calldata _proof,
+    address _controller
   ) internal {
     if (keccak256(bytes(_proof.domainName)) != keccak256(bytes(domain))) {
       revert WrongDomain(_proof.domainName);
@@ -471,24 +464,30 @@ contract Registry is
       revert EmailAlreadyUsed(_proof.emailNullifier);
     }
 
-    if (!verifier.verifyEmailProof(_proof)) {
+    if (_proof.timestamp + EMAIL_LIFETIME < block.timestamp) {
+      revert ExpiredEmail(_proof.timestamp);
+    }
+
+    if (!verifier.verifyEmailProof(_proof, _controller)) {
       revert InvalidEmailProof();
     }
     usedNullifiers[_proof.emailNullifier] = true;
     emit EmailAuthorized(
-      _proof.accountSalt, _proof.emailNullifier, _proof.timestamp,
-      _proof.maskedCommand
+      _proof.profileId, _proof.emailNullifier, _proof.publicKeyHash,
+      _proof.timestamp
     );
   }
 
   /**
-    Authorize an email operation on an existing profile: the profile must be
-    active, the email must not predate the last email honored for it, the
-    profile's controller must have signed off on this exact email, and the email
-    itself must verify and be consumed. This is the two-of-two: neither the
-    email nor the controller alone moves an existing profile.
+    Authorize an email operation on an existing profile: management must not be
+    flagged inactive, the email must not predate the last email honored for it,
+    the profile's controller must have signed off on this exact email, and the
+    email itself must verify and be consumed. This is the two-of-two: neither
+    the email nor the controller alone moves an existing profile. A lapsed
+    profile may still be renewed this way.
 
-    @param _proof The ZK Email proof to verify and consume.
+    @param _proof The email proof to verify and consume.
+    @param _controller The controller the email's subject must authorize.
     @param _signature The controller's signature over `authorizationDigest` of
       the email's nullifier.
 
@@ -496,9 +495,10 @@ contract Registry is
   */
   function _authorize (
     EmailProof calldata _proof,
+    address _controller,
     bytes calldata _signature
   ) internal returns (Profile storage) {
-    bytes32 _profileId = _proof.accountSalt;
+    bytes32 _profileId = _proof.profileId;
     Profile storage p = profiles[_profileId];
     if (p.registeredAt == 0) {
       revert UnknownProfile(_profileId);
@@ -508,7 +508,7 @@ contract Registry is
       revert InactiveProfile(_profileId);
     }
 
-    if (_proof.timestamp != 0 && _proof.timestamp < p.lastTimestamp) {
+    if (_proof.timestamp < p.lastTimestamp) {
       revert StaleEmail(_proof.timestamp, p.lastTimestamp);
     }
 
@@ -519,11 +519,90 @@ contract Registry is
     ) {
       revert InvalidControllerSignature();
     }
-    _verifyEmail(_proof);
-    if (_proof.timestamp != 0) {
-      p.lastTimestamp = _proof.timestamp;
+    _verifyEmail(_proof, _controller);
+    p.lastTimestamp = _proof.timestamp;
+    return p;
+  }
+
+  /**
+    Revert unless a profile's records may be written: it exists, management has
+    not been flagged inactive, and it has not lapsed.
+
+    @param _profileId The ID of the profile.
+
+    @return _ The profile.
+  */
+  function _writable (
+    bytes32 _profileId
+  ) internal view returns (Profile storage) {
+    Profile storage p = profiles[_profileId];
+    if (p.registeredAt == 0) {
+      revert UnknownProfile(_profileId);
+    }
+
+    if (!p.active) {
+      revert InactiveProfile(_profileId);
+    }
+
+    if (block.timestamp >= p.lastTimestamp + RENEWAL_PERIOD) {
+      revert LapsedProfile(_profileId);
     }
     return p;
+  }
+
+  /**
+    Revert unless a batch of records is well formed: as many values as keys, and
+    every key usable.
+
+    @param _keys The record keys.
+    @param _values The record values, paired with the keys by position.
+  */
+  function _requireRecords (
+    string[] calldata _keys,
+    string[] calldata _values
+  ) internal pure {
+    if (_keys.length != _values.length) {
+      revert LengthMismatch();
+    }
+    for (uint256 i = 0; i < _keys.length; ++i) {
+      _requireKey(_keys[i]);
+    }
+  }
+
+  /**
+    Hash an array of strings as EIP-712 encodes a `string[]` member: the hash of
+    the concatenated hashes of its elements.
+
+    @param _strings The strings to hash.
+
+    @return _ The EIP-712 encoding of the array.
+  */
+  function _hashStrings (
+    string[] calldata _strings
+  ) internal pure returns (bytes32) {
+    bytes32[] memory _hashes = new bytes32[](_strings.length);
+    for (uint256 i = 0; i < _strings.length; ++i) {
+      _hashes[i] = keccak256(bytes(_strings[i]));
+    }
+    return keccak256(abi.encodePacked(_hashes));
+  }
+
+  /**
+    Write a batch of text records in order, so a later write to a key overrides
+    an earlier one, announcing each.
+
+    @param _profileId The ID of the profile.
+    @param _keys The record keys.
+    @param _values The record values, paired with the keys; empty clears.
+  */
+  function _setTexts (
+    bytes32 _profileId,
+    string[] calldata _keys,
+    string[] calldata _values
+  ) internal {
+    for (uint256 i = 0; i < _keys.length; ++i) {
+      _setText(_profileId, _keys[i], _values[i]);
+    }
   }
 
   /**
@@ -567,33 +646,37 @@ contract Registry is
   }
 
   /**
-    Retrieve the binding tag every command ends with: `{chainid}:{registry}` for
-    this exact deployment. A command bound this way can never be honored by any
-    other registry on any other chain.
+    Check whether a profile is active: registered, not flagged inactive, and
+    renewed within `RENEWAL_PERIOD`. A gate that admits current EF personnel
+    checks this.
 
-    @return _ The binding tag.
+    @param _profileId The ID of the profile.
+
+    @return _ Whether the profile is active.
   */
-  function commandBinding () public view returns (string memory) {
-    return string.concat(
-      block.chainid.toString(), ":", address(this).toHexStringChecksummed()
-    );
+  function isActive (
+    bytes32 _profileId
+  ) external view returns (bool) {
+    Profile storage p = profiles[_profileId];
+    return p.registeredAt != 0 && p.active
+    && block.timestamp < p.lastTimestamp + RENEWAL_PERIOD;
   }
 
   /**
-    Build the command an email must carry to set a controller. The address is
-    rendered checksummed; lowercase and uppercase hex are also accepted.
+    Retrieve when a profile lapses unless renewed.
 
-    @param _controller The controller to set.
+    @param _profileId The ID of the profile.
 
-    @return _ The command.
+    @return _ The timestamp at which the profile lapses; zero if unregistered.
   */
-  function setControllerCommand (
-    address _controller
-  ) public view returns (string memory) {
-    return string.concat(
-      SET_CONTROLLER_PREFIX, _controller.toHexStringChecksummed(), " ",
-      commandBinding()
-    );
+  function expiresAt (
+    bytes32 _profileId
+  ) external view returns (uint256) {
+    Profile storage p = profiles[_profileId];
+    if (p.registeredAt == 0) {
+      return 0;
+    }
+    return p.lastTimestamp + RENEWAL_PERIOD;
   }
 
   /**
@@ -642,40 +725,59 @@ contract Registry is
   }
 
   /**
-    Register a profile by email, binding its controller. The email's command
-    must read `Set controller to {address} {binding}` (see
-    `setControllerCommand`), it must carry the identity's account code, and the
-    controller may not be zero: every profile is a two-of-two from birth.
-    Registration is the one email operation needing no controller signature.
-    Anyone may submit the proof.
+    Return the EIP-712 digest a profile's controller signs to authorize one
+    relayed batch of text-record writes at the profile's current nonce. The
+    digest binds the profile, every key and value in order, and the nonce to
+    this exact registry on this exact chain, so each signature writes one batch
+    once.
 
-    @param _proof The ZK Email proof of the command email.
-    @param _controller The controller the command names.
+    @param _profileId The ID of the profile.
+    @param _keys The record keys.
+    @param _values The record values, paired with the keys; empty clears.
+
+    @return _ The digest for the controller to sign.
+  */
+  function setTextsDigest (
+    bytes32 _profileId,
+    string[] calldata _keys,
+    string[] calldata _values
+  ) public view returns (bytes32) {
+    return _hashTypedData(
+      keccak256(
+        abi.encode(
+          SET_TEXTS_TYPEHASH, _profileId, _hashStrings(_keys),
+          _hashStrings(_values), nonces[_profileId]
+        )
+      )
+    );
+  }
+
+  /**
+    Register a profile by email, binding its controller. The email's subject
+    must commit to `_controller`, this registry, this chain, and the profile's
+    salt, and the controller may not be zero: every profile is a two-of-two from
+    birth. Registration is the one email operation needing no controller
+    signature. Anyone may submit the proof. One person may hold several
+    profiles, one per salt; a profile whose controller key or salt is lost
+    simply lapses, and its owner registers a fresh one.
+
+    @param _proof The email proof.
+    @param _controller The controller the email authorizes.
   */
   function register (
     EmailProof calldata _proof,
     address _controller
   ) external {
-    if (!_isSetControllerCommand(_proof.maskedCommand, _controller)) {
-      revert InvalidCommand(_proof.maskedCommand);
-    }
-
     if (_controller == address(0)) {
       revert ZeroAddress();
     }
-    bytes32 _profileId = _proof.accountSalt;
+    bytes32 _profileId = _proof.profileId;
     Profile storage p = profiles[_profileId];
     if (p.registeredAt != 0) {
       revert AlreadyRegistered(_profileId);
     }
-
-    if (!_proof.isCodeExist) {
-      revert MissingAccountCode();
-    }
-    _verifyEmail(_proof);
-    if (_proof.timestamp != 0) {
-      p.lastTimestamp = _proof.timestamp;
-    }
+    _verifyEmail(_proof, _controller);
+    p.lastTimestamp = _proof.timestamp;
     p.active = true;
     p.registeredAt = block.timestamp;
     p.controller = _controller;
@@ -685,13 +787,15 @@ contract Registry is
   }
 
   /**
-    Rotate a profile's controller: email plus the current controller's
-    signature. The email's command must read `Set controller to {address}
-    {binding}` (see `setControllerCommand`), and the new controller may not be
-    zero. Anyone may submit the proof.
+    Renew a profile, or rotate its controller: a fresh email plus the current
+    controller's signature. The email's subject must commit to `_controller`,
+    this registry, this chain, and the profile's salt, and the new controller
+    may not be zero. Renewal is a rotation to the current controller. Every call
+    restarts the profile's `RENEWAL_PERIOD`, including on a lapsed profile.
+    Anyone may submit the proof.
 
-    @param _proof The ZK Email proof of the command email.
-    @param _controller The controller the command names.
+    @param _proof The email proof.
+    @param _controller The controller the email authorizes.
     @param _signature The current controller's signature over
       `authorizationDigest` of the email's nullifier.
   */
@@ -700,21 +804,17 @@ contract Registry is
     address _controller,
     bytes calldata _signature
   ) external {
-    if (!_isSetControllerCommand(_proof.maskedCommand, _controller)) {
-      revert InvalidCommand(_proof.maskedCommand);
-    }
-
     if (_controller == address(0)) {
       revert ZeroAddress();
     }
-    Profile storage p = _authorize(_proof, _signature);
+    Profile storage p = _authorize(_proof, _controller, _signature);
     p.controller = _controller;
-    emit ControllerSet(_proof.accountSalt, _controller);
+    emit ControllerSet(_proof.profileId, _controller);
   }
 
   /**
     Set a profile's text record as its controller. An empty value clears the
-    record. Inactive profiles are read-only.
+    record. Inactive and lapsed profiles are read-only.
 
     @param _profileId The ID of the profile.
     @param _key The record key; it may not contain spaces.
@@ -725,17 +825,9 @@ contract Registry is
     string calldata _key,
     string calldata _value
   ) external {
-    Profile storage p = profiles[_profileId];
-    if (p.registeredAt == 0) {
-      revert UnknownProfile(_profileId);
-    }
-
+    Profile storage p = _writable(_profileId);
     if (msg.sender != p.controller) {
       revert NotController();
-    }
-
-    if (!p.active) {
-      revert InactiveProfile(_profileId);
     }
     _requireKey(_key);
     _setText(_profileId, _key, _value);
@@ -746,7 +838,7 @@ contract Registry is
     controller that can sign but cannot transact wields full control and anyone
     may carry the transaction. The signature covers `setTextDigest` at the
     profile's current nonce, which this call consumes. An empty value clears the
-    record. Inactive profiles are read-only.
+    record. Inactive and lapsed profiles are read-only.
 
     @param _profileId The ID of the profile.
     @param _key The record key; it may not contain spaces.
@@ -759,14 +851,7 @@ contract Registry is
     string calldata _value,
     bytes calldata _signature
   ) external {
-    Profile storage p = profiles[_profileId];
-    if (p.registeredAt == 0) {
-      revert UnknownProfile(_profileId);
-    }
-
-    if (!p.active) {
-      revert InactiveProfile(_profileId);
-    }
+    Profile storage p = _writable(_profileId);
     _requireKey(_key);
     if (
       !SignatureCheckerLib.isValidSignatureNowCalldata(
@@ -780,8 +865,70 @@ contract Registry is
   }
 
   /**
-    Flag a profile active or inactive. Only management may do this. An inactive
-    profile is "former EF": read-only, with its records left in place.
+    Set several of a profile's text records at once as its controller, in order,
+    so a later write to a key overrides an earlier one. An empty value clears
+    its record. Inactive and lapsed profiles are read-only.
+
+    @param _profileId The ID of the profile.
+    @param _keys The record keys; none may contain spaces.
+    @param _values The new record values, paired with the keys by position.
+  */
+  function setTexts (
+    bytes32 _profileId,
+    string[] calldata _keys,
+    string[] calldata _values
+  ) external {
+    Profile storage p = _writable(_profileId);
+    if (msg.sender != p.controller) {
+      revert NotController();
+    }
+    _requireRecords(_keys, _values);
+    _setTexts(_profileId, _keys, _values);
+  }
+
+  /**
+    Set several of a profile's text records at once by one relayed signature of
+    its controller, in order, so a later write to a key overrides an earlier
+    one. The signature covers `setTextsDigest` at the profile's current nonce,
+    which this call consumes. An empty value clears its record. An empty batch
+    writes nothing but still consumes the nonce, which lets a controller revoke
+    every signed write it has handed out and not yet seen broadcast. Inactive
+    and lapsed profiles are read-only.
+
+    @param _profileId The ID of the profile.
+    @param _keys The record keys; none may contain spaces.
+    @param _values The new record values, paired with the keys by position.
+    @param _signature The controller's signature over `setTextsDigest`.
+  */
+  function setTextsSigned (
+    bytes32 _profileId,
+    string[] calldata _keys,
+    string[] calldata _values,
+    bytes calldata _signature
+  ) external {
+    Profile storage p = _writable(_profileId);
+    _requireRecords(_keys, _values);
+    if (
+      !SignatureCheckerLib.isValidSignatureNowCalldata(
+        p.controller, setTextsDigest(_profileId, _keys, _values), _signature
+      )
+    ) {
+      revert InvalidControllerSignature();
+    }
+    nonces[_profileId] += 1;
+    _setTexts(_profileId, _keys, _values);
+  }
+
+  /**
+    Flag a profile inactive ("former EF"), or restore it. Management may do
+    either to any profile, though it can only recognize a profile for some
+    reason beyond its ID, since IDs reveal no owner. Anyone may flag a lapsed
+    profile inactive: its owner stopped proving membership, so saying so needs
+    no special power. Only management may restore a profile, or touch one that
+    has not lapsed. An inactive profile is read-only, with its records left in
+    place, and cannot renew, so flagging a lapsed profile ends it for good
+    unless management restores it; its owner may instead register a fresh
+    profile under a new salt. Restoring a profile does not extend its expiry.
 
     @param _profileId The ID of the profile.
     @param _active The new active flag.
@@ -790,12 +937,16 @@ contract Registry is
     bytes32 _profileId,
     bool _active
   ) external {
-    if (msg.sender != management) {
-      revert NotManagement();
-    }
     Profile storage p = profiles[_profileId];
     if (p.registeredAt == 0) {
       revert UnknownProfile(_profileId);
+    }
+
+    if (msg.sender != management) {
+      bool _lapsed = block.timestamp >= p.lastTimestamp + RENEWAL_PERIOD;
+      if (_active || !_lapsed) {
+        revert NotManagement();
+      }
     }
     p.active = _active;
     emit ActiveSet(_profileId, _active);

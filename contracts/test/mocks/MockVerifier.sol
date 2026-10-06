@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-VPL WITH AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-(SEPPUKU WITH VPL) WITH AGPL-3.0-only
 pragma solidity 0.8.36;
 
 import { EmailProof, IVerifier } from "../../src/interfaces/IVerifier.sol";
@@ -9,46 +9,42 @@ import { EmailProof, IVerifier } from "../../src/interfaces/IVerifier.sol";
   @author Tim Clancy <tim-clancy.gwei>
   @custom:terry "Is this too much voodoo for the next ten centuries?"
 
-  A minimal test stand-in for the ZK Email proof verifier. It accepts exactly
-  the proofs whose proof bytes read `valid`, and, like the real circuit, only
-  commands that fit within its command length, so tests can forge a bad proof
-  by writing anything else.
+  A minimal test stand-in for the email proof verifier. Its proof bytes are
+  `abi.encode(VALID_PROOF, controller, chainId, registry)`, and it accepts a
+  proof exactly when those name the controller asked about, the current
+  chain, and the calling registry, as the real circuit's binding does. Tests
+  forge a bad proof by writing anything else.
 
-  @custom:date August 21st, 2026.
+  @custom:date September 30th, 2026.
 */
 contract MockVerifier is
   IVerifier {
 
-  /// The maximum command length of the real email-tx-builder circuit.
-  uint256 internal constant COMMAND_BYTES = 605;
-
-  /// The hash of the proof bytes this mock accepts.
-  bytes32 internal constant VALID_PROOF = keccak256("valid");
+  /// The tag a valid mock proof opens with.
+  bytes32 public constant VALID_PROOF = keccak256("valid");
 
   /**
-    Retrieve the maximum length in bytes of a command the circuit can carry.
-
-    @return _ The maximum command length in bytes.
-  */
-  function commandBytes () external pure returns (uint256) {
-    return COMMAND_BYTES;
-  }
-
-  /**
-    Verify an email proof: the proof bytes must read `valid` and the command
-    must fit the circuit.
+    Verify an email proof: the proof bytes must carry the valid tag and name
+    `_controller`, this chain, and the caller.
 
     @param _proof The email proof to verify.
+    @param _controller The controller the email must authorize.
 
     @return _ Whether the proof is valid.
   */
   function verifyEmailProof (
-    EmailProof calldata _proof
-  ) external pure returns (bool) {
-    if (bytes(_proof.maskedCommand).length > COMMAND_BYTES) {
+    EmailProof calldata _proof,
+    address _controller
+  ) external view returns (bool) {
+    if (_proof.proof.length != 128) {
       return false;
     }
-    return keccak256(_proof.proof) == VALID_PROOF;
+    (bytes32 _tag, address _authorized, uint256 _chainId, address _registry) =
+    abi.decode(
+      _proof.proof, (bytes32, address, uint256, address)
+    );
+    return _tag == VALID_PROOF && _authorized == _controller
+    && _chainId == block.chainid && _registry == msg.sender;
   }
 }
 
